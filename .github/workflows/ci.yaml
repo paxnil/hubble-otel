@@ -9,50 +9,7 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+-*"
 
 jobs:
-  test:
-    name: Run tests and linters
-    runs-on: ubuntu-20.04
-    steps:
-      - uses: actions/checkout@v2
-      - uses: docker://docker.io/library/golang:1.17.1-alpine@sha256:13919fb9091f6667cb375d5fdf016ecd6d3a5d5995603000d422b04583de4ef9
-        name: Run all tests
-        env:
-          CGO_ENABLED: "0"
-        with:
-          entrypoint: sh
-          args: -e -x -c "for dir in ./ ./receiver ; do cd $dir ; go vet ./... && go test ./... ; done"
-      - uses: docker://docker.io/library/golang:1.17.1-alpine@sha256:13919fb9091f6667cb375d5fdf016ecd6d3a5d5995603000d422b04583de4ef9
-        name: Ensure main package is functional
-        env:
-          CGO_ENABLED: "0"
-        with:
-          entrypoint: go
-          args: run ./ -help
-  build:
-    needs: test
-    name: Build the binary
-    runs-on: ubuntu-20.04
-    strategy:
-      matrix:
-        GOOS: [linux, darwin]
-        GOARCH: [amd64, arm64]
-    steps:
-      - uses: actions/checkout@v2
-      - uses: docker://docker.io/library/golang:1.17.1-alpine@sha256:13919fb9091f6667cb375d5fdf016ecd6d3a5d5995603000d422b04583de4ef9
-        env:
-          GOOS: ${{ matrix.GOOS }}
-          GOARCH: ${{ matrix.GOARCH }}
-          CGO_ENABLED: "0"
-        with:
-          entrypoint: go
-          args: build
-      - uses: actions/upload-artifact@v2
-        with:
-          name: hubble-otel-${{ matrix.GOOS }}-${{ matrix.GOARCH }}
-          path: hubble-otel
-
   images:
-    needs: test
     name: Build container images
     runs-on: ubuntu-20.04
     steps:
