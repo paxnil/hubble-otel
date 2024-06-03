@@ -1,9 +1,3 @@
-# OpenTelemetry-Go Prometheus Exporter
+# Prometheus Exporter
 
-OpenTelemetry Prometheus exporter
-
-## Installation
-
-```
-go get -u go.opentelemetry.io/otel/exporters/prometheus
-```
+[![PkgGoDev](https://pkg.go.dev/badge/go.opentelemetry.io/otel/exporters/prometheus)](https://pkg.go.dev/go.opentelemetry.io/otel/exporters/prometheus)

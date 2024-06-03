@@ -1,17 +1,7 @@
-// Copyright 2020 Authors of Hubble
-// Copyright 2020 Authors of Cilium
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of Hubble
+
+// Copyright Authors of Cilium
 
 package serveroption
 
@@ -22,16 +12,18 @@ import (
 	"os"
 	"strings"
 
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"golang.org/x/sys/unix"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+
 	observerpb "github.com/cilium/cilium/api/v1/observer"
 	peerpb "github.com/cilium/cilium/api/v1/peer"
 	recorderpb "github.com/cilium/cilium/api/v1/recorder"
 	"github.com/cilium/cilium/pkg/api"
 	"github.com/cilium/cilium/pkg/crypto/certloader"
 	v1 "github.com/cilium/cilium/pkg/hubble/api/v1"
-
-	"golang.org/x/sys/unix"
-	"google.golang.org/grpc/health"
-	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // MinTLSVersion defines the minimum TLS version clients are expected to
@@ -40,16 +32,19 @@ const MinTLSVersion = tls.VersionTLS13
 
 // Options stores all the configuration values for the hubble server.
 type Options struct {
-	Listener        net.Listener
-	HealthService   healthpb.HealthServer
-	ObserverService observerpb.ObserverServer
-	PeerService     peerpb.PeerServer
-	RecorderService recorderpb.RecorderServer
-	ServerTLSConfig certloader.ServerConfigBuilder
-	Insecure        bool
+	Listener               net.Listener
+	HealthService          healthpb.HealthServer
+	ObserverService        observerpb.ObserverServer
+	PeerService            peerpb.PeerServer
+	RecorderService        recorderpb.RecorderServer
+	ServerTLSConfig        certloader.ServerConfigBuilder
+	Insecure               bool
+	GRPCMetrics            *grpc_prometheus.ServerMetrics
+	GRPCUnaryInterceptors  []grpc.UnaryServerInterceptor
+	GRPCStreamInterceptors []grpc.StreamServerInterceptor
 }
 
-// Option customizes then configuration of the hubble server.
+// Option customizes the hubble server's configuration.
 type Option func(o *Options) error
 
 // WithTCPListener configures a TCP listener with the address.
@@ -137,10 +132,36 @@ func WithServerTLS(cfg certloader.ServerConfigBuilder) Option {
 	}
 }
 
-// WithPeerService configures the server to expose the given peer server service.
+// WithRecorderService configures the server to expose the given recorder
+// server service.
 func WithRecorderService(svc recorderpb.RecorderServer) Option {
 	return func(o *Options) error {
 		o.RecorderService = svc
+		return nil
+	}
+}
+
+// WithGRPCMetrics configures the server with the specified prometheus gPRC
+// ServerMetrics.
+func WithGRPCMetrics(grpcMetrics *grpc_prometheus.ServerMetrics) Option {
+	return func(o *Options) error {
+		o.GRPCMetrics = grpcMetrics
+		return nil
+	}
+}
+
+// WithGRPCStreamInterceptor configures the server with the given gRPC server stream interceptors
+func WithGRPCStreamInterceptor(interceptors ...grpc.StreamServerInterceptor) Option {
+	return func(o *Options) error {
+		o.GRPCStreamInterceptors = append(o.GRPCStreamInterceptors, interceptors...)
+		return nil
+	}
+}
+
+// WithGRPCUnaryInterceptor configures the server with the given gRPC server stream interceptors
+func WithGRPCUnaryInterceptor(interceptors ...grpc.UnaryServerInterceptor) Option {
+	return func(o *Options) error {
+		o.GRPCUnaryInterceptors = append(o.GRPCUnaryInterceptors, interceptors...)
 		return nil
 	}
 }

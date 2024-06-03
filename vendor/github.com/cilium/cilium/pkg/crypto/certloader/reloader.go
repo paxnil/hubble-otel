@@ -1,16 +1,5 @@
-// Copyright 2020 Authors of Cilium
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of Cilium
 
 package certloader
 
@@ -36,8 +25,10 @@ type FileReloader struct {
 	mutex       lock.Mutex
 	// fields below should only be accessed with mutex acquired as they may be
 	// updated concurrently.
-	caCertPool *x509.CertPool
-	keypair    *tls.Certificate
+	caCertPool           *x509.CertPool
+	caCertPoolGeneration uint // incremented when caCertPool is reloaded
+	keypair              *tls.Certificate
+	keypairGeneration    uint // incremented when keypair is reloaded
 }
 
 var (
@@ -135,8 +126,14 @@ func (r *FileReloader) Reload() (keypair *tls.Certificate, caCertPool *x509.Cert
 	}
 
 	r.mutex.Lock()
-	r.keypair = keypair
-	r.caCertPool = caCertPool
+	if r.HasKeypair() {
+		r.keypair = keypair
+		r.keypairGeneration++
+	}
+	if r.HasCustomCA() {
+		r.caCertPool = caCertPool
+		r.caCertPoolGeneration++
+	}
 	r.mutex.Unlock()
 	return
 }
@@ -153,6 +150,7 @@ func (r *FileReloader) ReloadKeypair() (*tls.Certificate, error) {
 	}
 	r.mutex.Lock()
 	r.keypair = keypair
+	r.keypairGeneration++
 	r.mutex.Unlock()
 	return keypair, nil
 }
@@ -169,6 +167,7 @@ func (r *FileReloader) ReloadCA() (*x509.CertPool, error) {
 	}
 	r.mutex.Lock()
 	r.caCertPool = caCertPool
+	r.caCertPoolGeneration++
 	r.mutex.Unlock()
 	return caCertPool, nil
 }
@@ -177,7 +176,7 @@ func (r *FileReloader) ReloadCA() (*x509.CertPool, error) {
 func (r *FileReloader) readKeypair() (*tls.Certificate, error) {
 	keypair, err := tls.LoadX509KeyPair(r.certFile, r.privkeyFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load keypair: %s", err)
+		return nil, fmt.Errorf("failed to load keypair: %w", err)
 	}
 	return &keypair, nil
 }
@@ -188,11 +187,18 @@ func (r *FileReloader) readCertificateAuthority() (*x509.CertPool, error) {
 	for _, path := range r.caFiles {
 		pem, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load cert %q: %s", path, err)
+			return nil, fmt.Errorf("failed to load cert %q: %w", path, err)
 		}
 		if ok := caCertPool.AppendCertsFromPEM(pem); !ok {
 			return nil, fmt.Errorf("failed to load cert %q: must be PEM encoded", path)
 		}
 	}
 	return caCertPool, nil
+}
+
+// generations returns the keypair and caCertPool generation counters.
+func (r *FileReloader) generations() (uint, uint) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return r.keypairGeneration, r.caCertPoolGeneration
 }

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
+
+	"github.com/scaleway/scaleway-sdk-go/internal/async"
 
 	"github.com/scaleway/scaleway-sdk-go/internal/errors"
 	"github.com/scaleway/scaleway-sdk-go/scw"
@@ -103,10 +106,22 @@ type AttachVolumeResponse struct {
 
 // volumesToVolumeTemplates converts a map of *Volume to a map of *VolumeTemplate
 // so it can be used in a UpdateServer request
-func volumesToVolumeTemplates(volumes map[string]*Volume) map[string]*VolumeTemplate {
-	volumeTemplates := map[string]*VolumeTemplate{}
+func volumesToVolumeTemplates(volumes map[string]*VolumeServer) map[string]*VolumeServerTemplate {
+	volumeTemplates := map[string]*VolumeServerTemplate{}
 	for key, volume := range volumes {
-		volumeTemplates[key] = &VolumeTemplate{ID: volume.ID, Name: volume.Name}
+		volumeTemplate := &VolumeServerTemplate{
+			ID: &volume.ID,
+		}
+
+		if volume.Name != "" {
+			volumeTemplate.Name = &volume.Name
+		}
+
+		if volume.VolumeType == VolumeServerVolumeTypeSbsVolume {
+			volumeTemplate.VolumeType = VolumeVolumeTypeSbsVolume
+		}
+
+		volumeTemplates[key] = volumeTemplate
 	}
 	return volumeTemplates
 }
@@ -116,6 +131,15 @@ func volumesToVolumeTemplates(volumes map[string]*Volume) map[string]*VolumeTemp
 // Note: Implementation is thread-safe.
 func (s *API) AttachVolume(req *AttachVolumeRequest, opts ...scw.RequestOption) (*AttachVolumeResponse, error) {
 	defer lockServer(req.Zone, req.ServerID).Unlock()
+	// check where the volume comes from
+	volume, err := s.getUnknownVolume(&getUnknownVolumeRequest{
+		Zone:     req.Zone,
+		VolumeID: req.VolumeID,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	// get server with volumes
 	getServerResponse, err := s.GetServer(&GetServerRequest{
 		Zone:     req.Zone,
@@ -136,11 +160,15 @@ func (s *API) AttachVolume(req *AttachVolumeRequest, opts ...scw.RequestOption) 
 	for i := 0; i <= len(volumes); i++ {
 		key := fmt.Sprintf("%d", i)
 		if _, ok := newVolumes[key]; !ok {
-			newVolumes[key] = &VolumeTemplate{
-				ID: req.VolumeID,
-				// name is ignored on this PATCH
-				Name: req.VolumeID,
+			newVolumes[key] = &VolumeServerTemplate{
+				ID: &req.VolumeID,
 			}
+			if volume.Type == VolumeVolumeTypeSbsVolume {
+				newVolumes[key].VolumeType = VolumeVolumeTypeSbsVolume
+			} else {
+				newVolumes[key].Name = &req.VolumeID
+			}
+
 			found = true
 			break
 		}
@@ -167,6 +195,10 @@ func (s *API) AttachVolume(req *AttachVolumeRequest, opts ...scw.RequestOption) 
 type DetachVolumeRequest struct {
 	Zone     scw.Zone `json:"-"`
 	VolumeID string   `json:"-"`
+	// IsBlockVolume should be set to true if volume is from block API,
+	// can be set to false if volume is from instance API,
+	// if left nil both API will be tried
+	IsBlockVolume *bool `json:"-"`
 }
 
 // DetachVolumeResponse contains the updated server after detaching a volume
@@ -178,27 +210,23 @@ type DetachVolumeResponse struct {
 //
 // Note: Implementation is thread-safe.
 func (s *API) DetachVolume(req *DetachVolumeRequest, opts ...scw.RequestOption) (*DetachVolumeResponse, error) {
-	// get volume
-	getVolumeResponse, err := s.GetVolume(&GetVolumeRequest{
+	volume, err := s.getUnknownVolume(&getUnknownVolumeRequest{
 		Zone:     req.Zone,
 		VolumeID: req.VolumeID,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if getVolumeResponse.Volume == nil {
-		return nil, errors.New("expected volume to have value in response")
-	}
-	if getVolumeResponse.Volume.Server == nil {
+
+	if volume.ServerID == nil {
 		return nil, errors.New("volume should be attached to a server")
 	}
-	serverID := getVolumeResponse.Volume.Server.ID
 
-	defer lockServer(req.Zone, serverID).Unlock()
+	defer lockServer(req.Zone, *volume.ServerID).Unlock()
 	// get server with volumes
 	getServerResponse, err := s.GetServer(&GetServerRequest{
 		Zone:     req.Zone,
-		ServerID: serverID,
+		ServerID: *volume.ServerID,
 	})
 	if err != nil {
 		return nil, err
@@ -216,7 +244,7 @@ func (s *API) DetachVolume(req *DetachVolumeRequest, opts ...scw.RequestOption) 
 	// update server
 	updateServerResponse, err := s.updateServer(&UpdateServerRequest{
 		Zone:     req.Zone,
-		ServerID: serverID,
+		ServerID: *volume.ServerID,
 		Volumes:  &newVolumes,
 	})
 	if err != nil {
@@ -280,32 +308,6 @@ func (r *ListImagesResponse) UnsafeSetTotalCount(totalCount int) {
 	r.TotalCount = uint32(totalCount)
 }
 
-// UnsafeGetTotalCount should not be used
-// Internal usage only
-func (r *ListServersTypesResponse) UnsafeGetTotalCount() uint32 {
-	return r.TotalCount
-}
-
-// UnsafeAppend should not be used
-// Internal usage only
-func (r *ListServersTypesResponse) UnsafeAppend(res interface{}) (uint32, error) {
-	results, ok := res.(*ListServersTypesResponse)
-	if !ok {
-		return 0, errors.New("%T type cannot be appended to type %T", res, r)
-	}
-
-	if r.Servers == nil {
-		r.Servers = make(map[string]*ServerType, len(results.Servers))
-	}
-
-	for name, serverType := range results.Servers {
-		r.Servers[name] = serverType
-	}
-
-	r.TotalCount += uint32(len(results.Servers))
-	return uint32(len(results.Servers)), nil
-}
-
 func (v *NullableStringValue) UnmarshalJSON(b []byte) error {
 	if string(b) == "null" {
 		v.Null = true
@@ -326,4 +328,107 @@ func (v *NullableStringValue) MarshalJSON() ([]byte, error) {
 		return []byte("null"), nil
 	}
 	return json.Marshal(v.Value)
+}
+
+// WaitForPrivateNICRequest is used by WaitForPrivateNIC method.
+type WaitForPrivateNICRequest struct {
+	ServerID      string
+	PrivateNicID  string
+	Zone          scw.Zone
+	Timeout       *time.Duration
+	RetryInterval *time.Duration
+}
+
+// WaitForPrivateNIC wait for the private network to be in a "terminal state" before returning.
+// This function can be used to wait for the private network to be attached for example.
+func (s *API) WaitForPrivateNIC(req *WaitForPrivateNICRequest, opts ...scw.RequestOption) (*PrivateNIC, error) {
+	timeout := defaultTimeout
+	if req.Timeout != nil {
+		timeout = *req.Timeout
+	}
+	retryInterval := defaultRetryInterval
+	if req.RetryInterval != nil {
+		retryInterval = *req.RetryInterval
+	}
+
+	terminalStatus := map[PrivateNICState]struct{}{
+		PrivateNICStateAvailable:    {},
+		PrivateNICStateSyncingError: {},
+	}
+
+	pn, err := async.WaitSync(&async.WaitSyncConfig{
+		Get: func() (interface{}, bool, error) {
+			res, err := s.GetPrivateNIC(&GetPrivateNICRequest{
+				ServerID:     req.ServerID,
+				Zone:         req.Zone,
+				PrivateNicID: req.PrivateNicID,
+			}, opts...)
+
+			if err != nil {
+				return nil, false, err
+			}
+			_, isTerminal := terminalStatus[res.PrivateNic.State]
+
+			return res.PrivateNic, isTerminal, err
+		},
+		Timeout:          timeout,
+		IntervalStrategy: async.LinearIntervalStrategy(retryInterval),
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "waiting for server failed")
+	}
+	return pn.(*PrivateNIC), nil
+}
+
+// WaitForMACAddressRequest is used by WaitForMACAddress method.
+type WaitForMACAddressRequest struct {
+	ServerID      string
+	PrivateNicID  string
+	Zone          scw.Zone
+	Timeout       *time.Duration
+	RetryInterval *time.Duration
+}
+
+// WaitForMACAddress wait for the MAC address be assigned on instance before returning.
+// This function can be used to wait for the private network to be attached for example.
+func (s *API) WaitForMACAddress(req *WaitForMACAddressRequest, opts ...scw.RequestOption) (*PrivateNIC, error) {
+	timeout := defaultTimeout
+	if req.Timeout != nil {
+		timeout = *req.Timeout
+	}
+	retryInterval := defaultRetryInterval
+	if req.RetryInterval != nil {
+		retryInterval = *req.RetryInterval
+	}
+
+	pn, err := async.WaitSync(&async.WaitSyncConfig{
+		Get: func() (interface{}, bool, error) {
+			res, err := s.GetPrivateNIC(&GetPrivateNICRequest{
+				ServerID:     req.ServerID,
+				Zone:         req.Zone,
+				PrivateNicID: req.PrivateNicID,
+			}, opts...)
+			if err != nil {
+				return nil, false, err
+			}
+
+			if len(res.PrivateNic.MacAddress) > 0 {
+				return res.PrivateNic, true, err
+			}
+
+			return res.PrivateNic, false, err
+		},
+		Timeout:          timeout,
+		IntervalStrategy: async.LinearIntervalStrategy(retryInterval),
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "waiting for server failed")
+	}
+	return pn.(*PrivateNIC), nil
+}
+
+// UnsafeSetTotalCount should not be used
+// Internal usage only
+func (r *GetServerTypesAvailabilityResponse) UnsafeSetTotalCount(totalCount int) {
+	r.TotalCount = uint32(totalCount)
 }

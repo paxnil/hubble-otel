@@ -17,8 +17,19 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusreceiver"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/service"
-	"go.opentelemetry.io/collector/service/defaultcomponents"
+	"go.opentelemetry.io/collector/exporter"
+	"go.opentelemetry.io/collector/exporter/debugexporter"
+	"go.opentelemetry.io/collector/exporter/otlpexporter"
+	"go.opentelemetry.io/collector/exporter/otlphttpexporter"
+	"go.opentelemetry.io/collector/extension"
+	"go.opentelemetry.io/collector/extension/ballastextension"
+	"go.opentelemetry.io/collector/extension/zpagesextension"
+	"go.opentelemetry.io/collector/otelcol"
+	"go.opentelemetry.io/collector/processor"
+	"go.opentelemetry.io/collector/processor/batchprocessor"
+	"go.opentelemetry.io/collector/processor/memorylimiterprocessor"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/receiver/otlpreceiver"
 
 	commonV1 "go.opentelemetry.io/proto/otlp/common/v1"
 	resourceV1 "go.opentelemetry.io/proto/otlp/resource/v1"
@@ -86,34 +97,25 @@ func GetFlowSamples(t *testing.T, path string) []*observer.GetFlowsResponse {
 func RunOpenTelemtryCollector(ctx context.Context, t *testing.T, configPath string, fatal chan<- error, extraReceiverFactories ...component.ReceiverFactory) {
 	t.Helper()
 
-	factories, err := defaultcomponents.Components()
-	if err != nil {
-		t.Fatalf("failed to build default components: %v", err)
-	}
-
-	additionalReceiverFactories := []component.ReceiverFactory{
-		prometheusreceiver.NewFactory(),
-	}
-	additionalReceiverFactories = append(additionalReceiverFactories, extraReceiverFactories...)
-
-	additionalReceivers, err := component.MakeReceiverFactoryMap(
-		additionalReceiverFactories...,
-	)
-	if err != nil {
-		t.Fatalf("failed to build additional receivers: %v", err)
-	}
-	for k, v := range additionalReceivers {
-		factories.Receivers[k] = v
-	}
-
-	additionalExporters, err := component.MakeExporterFactoryMap(
-		prometheusexporter.NewFactory(),
-	)
-	if err != nil {
-		t.Fatalf("failed to build additional exporters: %v", err)
-	}
-	for k, v := range additionalExporters {
-		factories.Exporters[k] = v
+	factories := otelcol.Factories{
+		Extensions: []extension.Factory{
+			zpagesextension.NewFactory(),
+			ballastextension.NewFactory(),
+		},
+		Receivers: []receiver.Factory{
+			otlpreceiver.NewFactory(),
+			prometheusreceiver.NewFactory(),
+		},
+		Processors: []processor.Factory{
+			batchprocessor.NewFactory(),
+			memorylimiterprocessor.NewFactory(),
+		},
+		Exporters: []exporter.Factory{
+			debugexporter.NewFactory(),
+			otlpexporter.NewFactory(),
+			otlphttpexporter.NewFactory(),
+			prometheusexporter.NewFactory(),
+		},
 	}
 
 	info := component.BuildInfo{
@@ -122,9 +124,9 @@ func RunOpenTelemtryCollector(ctx context.Context, t *testing.T, configPath stri
 		Version:     "v0.30.1",
 	}
 
-	settings := service.CollectorSettings{BuildInfo: info, Factories: factories}
+	settings := otelcol.CollectorSettings{BuildInfo: info, Factories: factories}
 
-	cmd := service.NewCommand(settings)
+	cmd := otelcol.NewCommand(settings)
 	cmd.SetArgs([]string{
 		"--config=" + configPath,
 	})

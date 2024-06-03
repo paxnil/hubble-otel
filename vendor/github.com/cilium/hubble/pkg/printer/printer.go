@@ -1,16 +1,5 @@
-// Copyright 2019-2021 Authors of Hubble
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of Hubble
 
 package printer
 
@@ -22,14 +11,16 @@ import (
 	"net"
 	"os"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	pb "github.com/cilium/cilium/api/v1/flow"
+	flowpb "github.com/cilium/cilium/api/v1/flow"
 	observerpb "github.com/cilium/cilium/api/v1/observer"
 	relaypb "github.com/cilium/cilium/api/v1/relay"
+	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/monitor/api"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -54,6 +45,13 @@ func (ew *errWriter) write(a ...interface{}) {
 		return
 	}
 	_, ew.err = fmt.Fprint(ew.w, a...)
+}
+
+func (ew *errWriter) writef(format string, a ...interface{}) {
+	if ew.err != nil {
+		return
+	}
+	_, ew.err = fmt.Fprintf(ew.w, format, a...)
 }
 
 // New Printer.
@@ -81,7 +79,7 @@ func New(fopts ...Option) *Printer {
 		// initialize tabwriter since it's going to be needed
 		p.tw = tabwriter.NewWriter(opts.w, 2, 0, 3, ' ', 0)
 		p.color.disable() // the tabwriter is not compatible with colors, thus disable coloring
-	case JSONOutput, JSONPBOutput:
+	case JSONLegacyOutput, JSONPBOutput:
 		p.jsonEncoder = json.NewEncoder(p.opts.w)
 	}
 
@@ -114,23 +112,25 @@ func (p *Printer) WriteErr(msg string) error {
 }
 
 // GetPorts returns source and destination port of a flow.
-func (p *Printer) GetPorts(f *pb.Flow) (string, string) {
+func (p *Printer) GetPorts(f *flowpb.Flow) (string, string) {
 	l4 := f.GetL4()
 	if l4 == nil {
 		return "", ""
 	}
-	switch l4.Protocol.(type) {
-	case *pb.Layer4_TCP:
-		return strconv.Itoa(int(l4.GetTCP().SourcePort)), strconv.Itoa(int(l4.GetTCP().DestinationPort))
-	case *pb.Layer4_UDP:
-		return strconv.Itoa(int(l4.GetUDP().SourcePort)), strconv.Itoa(int(l4.GetUDP().DestinationPort))
+	switch l4.GetProtocol().(type) {
+	case *flowpb.Layer4_TCP:
+		return strconv.Itoa(int(l4.GetTCP().GetSourcePort())), strconv.Itoa(int(l4.GetTCP().GetDestinationPort()))
+	case *flowpb.Layer4_UDP:
+		return strconv.Itoa(int(l4.GetUDP().GetSourcePort())), strconv.Itoa(int(l4.GetUDP().GetDestinationPort()))
+	case *flowpb.Layer4_SCTP:
+		return strconv.Itoa(int(l4.GetSCTP().GetSourcePort())), strconv.Itoa(int(l4.GetSCTP().GetDestinationPort()))
 	default:
 		return "", ""
 	}
 }
 
 // GetHostNames returns source and destination hostnames of a flow.
-func (p *Printer) GetHostNames(f *pb.Flow) (string, string) {
+func (p *Printer) GetHostNames(f *flowpb.Flow) (string, string) {
 	var srcNamespace, dstNamespace, srcPodName, dstPodName, srcSvcName, dstSvcName string
 	if f == nil {
 		return "", ""
@@ -144,25 +144,47 @@ func (p *Printer) GetHostNames(f *pb.Flow) (string, string) {
 	}
 
 	if src := f.GetSource(); src != nil {
-		srcNamespace = src.Namespace
-		srcPodName = src.PodName
+		srcNamespace = src.GetNamespace()
+		srcPodName = src.GetPodName()
 	}
 	if dst := f.GetDestination(); dst != nil {
-		dstNamespace = dst.Namespace
-		dstPodName = dst.PodName
+		dstNamespace = dst.GetNamespace()
+		dstPodName = dst.GetPodName()
 	}
 	if svc := f.GetSourceService(); svc != nil {
-		srcNamespace = svc.Namespace
-		srcSvcName = svc.Name
+		srcNamespace = svc.GetNamespace()
+		srcSvcName = svc.GetName()
 	}
 	if svc := f.GetDestinationService(); svc != nil {
-		dstNamespace = svc.Namespace
-		dstSvcName = svc.Name
+		dstNamespace = svc.GetNamespace()
+		dstSvcName = svc.GetName()
 	}
 	srcPort, dstPort := p.GetPorts(f)
-	src := p.Hostname(f.GetIP().Source, srcPort, srcNamespace, srcPodName, srcSvcName, f.GetSourceNames())
-	dst := p.Hostname(f.GetIP().Destination, dstPort, dstNamespace, dstPodName, dstSvcName, f.GetDestinationNames())
+	src := p.Hostname(f.GetIP().GetSource(), srcPort, srcNamespace, srcPodName, srcSvcName, f.GetSourceNames())
+	dst := p.Hostname(f.GetIP().GetDestination(), dstPort, dstNamespace, dstPodName, dstSvcName, f.GetDestinationNames())
 	return p.color.host(src), p.color.host(dst)
+}
+
+func (p *Printer) fmtIdentity(i uint32) string {
+	numeric := identity.NumericIdentity(i)
+	if numeric.IsReservedIdentity() {
+		return p.color.identity(fmt.Sprintf("(%s)", numeric))
+	}
+
+	return p.color.identity(fmt.Sprintf("(ID:%d)", i))
+}
+
+// GetSecurityIdentities returns the source and destination numeric security
+// identity formatted as a string.
+func (p *Printer) GetSecurityIdentities(f *flowpb.Flow) (srcIdentity, dstIdentity string) {
+	if f == nil {
+		return "", ""
+	}
+
+	srcIdentity = p.fmtIdentity(f.GetSource().GetIdentity())
+	dstIdentity = p.fmtIdentity(f.GetDestination().GetIdentity())
+
+	return srcIdentity, dstIdentity
 }
 
 func fmtTimestamp(layout string, ts *timestamppb.Timestamp) string {
@@ -173,16 +195,17 @@ func fmtTimestamp(layout string, ts *timestamppb.Timestamp) string {
 }
 
 // GetFlowType returns the type of a flow as a string.
-func GetFlowType(f *pb.Flow) string {
+func GetFlowType(f *flowpb.Flow) string {
 	if l7 := f.GetL7(); l7 != nil {
 		l7Protocol := "l7"
-		l7Type := strings.ToLower(l7.Type.String())
+		l7Type := strings.ToLower(l7.GetType().String())
 		switch l7.GetRecord().(type) {
-		case *pb.Layer7_Http:
+		case *flowpb.Layer7_Http:
 			l7Protocol = "http"
-		case *pb.Layer7_Dns:
+		case *flowpb.Layer7_Dns:
 			l7Protocol = "dns"
-		case *pb.Layer7_Kafka:
+			l7Type += " " + l7.GetDns().GetObservationSource()
+		case *flowpb.Layer7_Kafka:
 			l7Protocol = "kafka"
 		}
 		return l7Protocol + "-" + l7Type
@@ -194,32 +217,78 @@ func GetFlowType(f *pb.Flow) string {
 	case api.MessageTypeDrop:
 		return api.DropReason(uint8(f.GetEventType().GetSubType()))
 	case api.MessageTypePolicyVerdict:
-		switch f.GetVerdict() {
-		case pb.Verdict_FORWARDED, pb.Verdict_AUDIT, pb.Verdict_REDIRECTED:
-			return api.PolicyMatchType(f.GetPolicyMatchType()).String()
-		case pb.Verdict_DROPPED:
-			return api.DropReason(uint8(f.GetDropReason()))
-		case pb.Verdict_ERROR:
-			// ERROR should only happen for L7 events.
-		}
+		return fmt.Sprintf("%s:%s %s",
+			api.MessageTypeNamePolicyVerdict,
+			api.PolicyMatchType(f.GetPolicyMatchType()).String(),
+			f.GetTrafficDirection().String())
+
 	case api.MessageTypeCapture:
 		return f.GetDebugCapturePoint().String()
+	case api.MessageTypeTraceSock:
+		switch f.GetSockXlatePoint() {
+		case flowpb.SocketTranslationPoint_SOCK_XLATE_POINT_POST_DIRECTION_FWD:
+			return "post-xlate-fwd"
+		case flowpb.SocketTranslationPoint_SOCK_XLATE_POINT_POST_DIRECTION_REV:
+			return "post-xlate-rev"
+		case flowpb.SocketTranslationPoint_SOCK_XLATE_POINT_PRE_DIRECTION_FWD:
+			return "pre-xlate-fwd"
+		case flowpb.SocketTranslationPoint_SOCK_XLATE_POINT_PRE_DIRECTION_REV:
+			return "pre-xlate-rev"
+		}
+		return f.GetSockXlatePoint().String()
 	}
 
 	return "UNKNOWN"
 }
 
-func (p Printer) getVerdict(f *pb.Flow) string {
+func (p Printer) getVerdict(f *flowpb.Flow) string {
 	verdict := f.GetVerdict()
+	msg := verdict.String()
 	switch verdict {
-	case pb.Verdict_FORWARDED, pb.Verdict_REDIRECTED:
-		return p.color.verdictForwarded(verdict.String())
-	case pb.Verdict_DROPPED, pb.Verdict_ERROR:
-		return p.color.verdictDropped(verdict.String())
-	case pb.Verdict_AUDIT:
-		return p.color.verdictAudit(verdict.String())
+	case flowpb.Verdict_FORWARDED, flowpb.Verdict_REDIRECTED:
+		if f.GetEventType().GetType() == api.MessageTypePolicyVerdict {
+			msg = "ALLOWED"
+		}
+		return p.color.verdictForwarded(msg)
+	case flowpb.Verdict_DROPPED, flowpb.Verdict_ERROR:
+		if f.GetEventType().GetType() == api.MessageTypePolicyVerdict {
+			msg = "DENIED"
+		}
+		return p.color.verdictDropped(msg)
+	case flowpb.Verdict_AUDIT:
+		if f.GetEventType().GetType() == api.MessageTypePolicyVerdict {
+			msg = "AUDITED"
+		}
+		return p.color.verdictAudit(msg)
+	case flowpb.Verdict_TRACED:
+		return p.color.verdictTraced(msg)
+	case flowpb.Verdict_TRANSLATED:
+		return p.color.verdictTranslated(msg)
 	default:
-		return verdict.String()
+		return msg
+	}
+}
+
+func (p Printer) getSummary(f *flowpb.Flow) string {
+	auth := p.getAuth(f)
+	if auth == "" {
+		return f.GetSummary()
+	}
+
+	return fmt.Sprintf("%s; Auth: %s", f.GetSummary(), auth)
+}
+
+func (p Printer) getAuth(f *flowpb.Flow) string {
+	auth := f.GetAuthType()
+	msg := auth.String()
+	switch auth {
+	case flowpb.AuthType_DISABLED:
+		// if auth is disabled we do not want to display anything
+		return ""
+	case flowpb.AuthType_TEST_ALWAYS_FAIL:
+		return p.color.authTestAlwaysFail(msg)
+	default:
+		return p.color.authIsEnabled(msg)
 	}
 }
 
@@ -254,7 +323,7 @@ func (p *Printer) WriteProtoFlow(res *observerpb.GetFlowsResponse) error {
 			dst, tab,
 			GetFlowType(f), tab,
 			p.getVerdict(f), tab,
-			f.GetSummary(), newline,
+			p.getSummary(f), newline,
 		)
 		if ew.err != nil {
 			return fmt.Errorf("failed to write out packet: %v", ew.err)
@@ -287,6 +356,7 @@ func (p *Printer) WriteProtoFlow(res *observerpb.GetFlowsResponse) error {
 	case CompactOutput:
 		var node string
 		src, dst := p.GetHostNames(f)
+		srcIdentity, dstIdentity := p.GetSecurityIdentities(f)
 
 		if p.opts.nodeName {
 			node = fmt.Sprintf(" [%s]", f.GetNodeName())
@@ -295,25 +365,28 @@ func (p *Printer) WriteProtoFlow(res *observerpb.GetFlowsResponse) error {
 		if f.GetIsReply() == nil {
 			// direction is unknown.
 			arrow = "<>"
-		} else if f.GetIsReply().Value {
+		} else if f.GetIsReply().GetValue() {
 			// flip the arrow and src/dst for reply packets.
 			src, dst = dst, src
+			srcIdentity, dstIdentity = dstIdentity, srcIdentity
 			arrow = "<-"
 		}
 		_, err := fmt.Fprintf(p.opts.w,
-			"%s%s: %s %s %s %s %s (%s)\n",
+			"%s%s: %s %s %s %s %s %s %s (%s)\n",
 			fmtTimestamp(p.opts.timeFormat, f.GetTime()),
 			node,
 			src,
+			srcIdentity,
 			arrow,
 			dst,
+			dstIdentity,
 			GetFlowType(f),
 			p.getVerdict(f),
-			f.GetSummary())
+			p.getSummary(f))
 		if err != nil {
 			return fmt.Errorf("failed to write out packet: %v", err)
 		}
-	case JSONOutput:
+	case JSONLegacyOutput:
 		return p.jsonEncoder.Encode(f)
 	case JSONPBOutput:
 		return p.jsonEncoder.Encode(res)
@@ -365,7 +438,7 @@ func (p *Printer) WriteProtoNodeStatusEvent(r *observerpb.GetFlowsResponse) erro
 	}
 
 	switch p.opts.output {
-	case JSONOutput, JSONPBOutput:
+	case JSONPBOutput:
 		return json.NewEncoder(p.opts.werr).Encode(r)
 	case DictOutput:
 		// this is a bit crude, but in case stdout and stderr are interleaved,
@@ -379,14 +452,14 @@ func (p *Printer) WriteProtoNodeStatusEvent(r *observerpb.GetFlowsResponse) erro
 		} else {
 			p.line++
 		}
-		nodeNames := joinWithCutOff(s.NodeNames, ", ", nodeNamesCutOff)
+		nodeNames := joinWithCutOff(s.GetNodeNames(), ", ", nodeNamesCutOff)
 		message := "N/A"
 		if m := s.GetMessage(); len(m) != 0 {
 			message = strconv.Quote(m)
 		}
 		_, err := fmt.Fprint(p.opts.werr,
 			"  TIMESTAMP: ", fmtTimestamp(p.opts.timeFormat, r.GetTime()), newline,
-			"      STATE: ", s.StateChange.String(), newline,
+			"      STATE: ", s.GetStateChange().String(), newline,
 			"      NODES: ", nodeNames, newline,
 			"    MESSAGE: ", message, newline,
 		)
@@ -394,11 +467,11 @@ func (p *Printer) WriteProtoNodeStatusEvent(r *observerpb.GetFlowsResponse) erro
 			return fmt.Errorf("failed to write out node status: %v", err)
 		}
 	case TabOutput, CompactOutput:
-		numNodes := len(s.NodeNames)
-		nodeNames := joinWithCutOff(s.NodeNames, ", ", nodeNamesCutOff)
+		numNodes := len(s.GetNodeNames())
+		nodeNames := joinWithCutOff(s.GetNodeNames(), ", ", nodeNamesCutOff)
 		prefix := fmt.Sprintf("%s [%s]", fmtTimestamp(p.opts.timeFormat, r.GetTime()), r.GetNodeName())
 		msg := fmt.Sprintf("%s: unknown node status event: %+v", prefix, s)
-		switch s.StateChange {
+		switch s.GetStateChange() {
 		case relaypb.NodeState_NODE_CONNECTED:
 			msg = fmt.Sprintf("%s: Receiving flows from %d nodes: %s", prefix, numNodes, nodeNames)
 		case relaypb.NodeState_NODE_UNAVAILABLE:
@@ -406,7 +479,7 @@ func (p *Printer) WriteProtoNodeStatusEvent(r *observerpb.GetFlowsResponse) erro
 		case relaypb.NodeState_NODE_GONE:
 			msg = fmt.Sprintf("%s: %d nodes removed from cluster: %s", prefix, numNodes, nodeNames)
 		case relaypb.NodeState_NODE_ERROR:
-			msg = fmt.Sprintf("%s: Error %q on %d nodes: %s", prefix, s.Message, numNodes, nodeNames)
+			msg = fmt.Sprintf("%s: Error %q on %d nodes: %s", prefix, s.GetMessage(), numNodes, nodeNames)
 		}
 
 		return p.WriteErr(msg)
@@ -415,93 +488,93 @@ func (p *Printer) WriteProtoNodeStatusEvent(r *observerpb.GetFlowsResponse) erro
 	return nil
 }
 
-func formatServiceAddr(a *pb.ServiceUpsertNotificationAddr) string {
-	return net.JoinHostPort(a.Ip, strconv.Itoa(int(a.Port)))
+func formatServiceAddr(a *flowpb.ServiceUpsertNotificationAddr) string {
+	return net.JoinHostPort(a.GetIp(), strconv.Itoa(int(a.GetPort())))
 }
 
-func getAgentEventDetails(e *pb.AgentEvent, timeLayout string) string {
+func getAgentEventDetails(e *flowpb.AgentEvent, timeLayout string) string {
 	switch e.GetType() {
-	case pb.AgentEventType_AGENT_EVENT_UNKNOWN:
+	case flowpb.AgentEventType_AGENT_EVENT_UNKNOWN:
 		if u := e.GetUnknown(); u != nil {
-			return fmt.Sprintf("type: %s, notification: %s", u.Type, u.Notification)
+			return fmt.Sprintf("type: %s, notification: %s", u.GetType(), u.GetNotification())
 		}
-	case pb.AgentEventType_AGENT_STARTED:
+	case flowpb.AgentEventType_AGENT_STARTED:
 		if a := e.GetAgentStart(); a != nil {
-			return fmt.Sprintf("start time: %s", fmtTimestamp(timeLayout, a.Time))
+			return fmt.Sprintf("start time: %s", fmtTimestamp(timeLayout, a.GetTime()))
 		}
-	case pb.AgentEventType_POLICY_UPDATED, pb.AgentEventType_POLICY_DELETED:
+	case flowpb.AgentEventType_POLICY_UPDATED, flowpb.AgentEventType_POLICY_DELETED:
 		if p := e.GetPolicyUpdate(); p != nil {
 			return fmt.Sprintf("labels: [%s], revision: %d, count: %d",
-				strings.Join(p.Labels, ","), p.Revision, p.RuleCount)
+				strings.Join(p.GetLabels(), ","), p.GetRevision(), p.GetRuleCount())
 		}
-	case pb.AgentEventType_ENDPOINT_REGENERATE_SUCCESS, pb.AgentEventType_ENDPOINT_REGENERATE_FAILURE:
+	case flowpb.AgentEventType_ENDPOINT_REGENERATE_SUCCESS, flowpb.AgentEventType_ENDPOINT_REGENERATE_FAILURE:
 		if r := e.GetEndpointRegenerate(); r != nil {
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "id: %d, labels: [%s]", r.Id, strings.Join(r.Labels, ","))
-			if re := r.Error; re != "" {
+			fmt.Fprintf(&sb, "id: %d, labels: [%s]", r.GetId(), strings.Join(r.GetLabels(), ","))
+			if re := r.GetError(); re != "" {
 				fmt.Fprintf(&sb, ", error: %s", re)
 			}
 			return sb.String()
 		}
-	case pb.AgentEventType_ENDPOINT_CREATED, pb.AgentEventType_ENDPOINT_DELETED:
+	case flowpb.AgentEventType_ENDPOINT_CREATED, flowpb.AgentEventType_ENDPOINT_DELETED:
 		if ep := e.GetEndpointUpdate(); ep != nil {
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "id: %d", ep.Id)
-			if n := ep.Namespace; n != "" {
+			fmt.Fprintf(&sb, "id: %d", ep.GetId())
+			if n := ep.GetNamespace(); n != "" {
 				fmt.Fprintf(&sb, ", namespace: %s", n)
 			}
-			if n := ep.PodName; n != "" {
+			if n := ep.GetPodName(); n != "" {
 				fmt.Fprintf(&sb, ", pod name: %s", n)
 			}
 			return sb.String()
 		}
-	case pb.AgentEventType_IPCACHE_UPSERTED, pb.AgentEventType_IPCACHE_DELETED:
+	case flowpb.AgentEventType_IPCACHE_UPSERTED, flowpb.AgentEventType_IPCACHE_DELETED:
 		if i := e.GetIpcacheUpdate(); i != nil {
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "cidr: %s, identity: %d", i.Cidr, i.Identity)
-			if i.OldIdentity != nil {
-				fmt.Fprintf(&sb, ", old identity: %d", i.OldIdentity.Value)
+			fmt.Fprintf(&sb, "cidr: %s, identity: %d", i.GetCidr(), i.GetIdentity())
+			if i.GetOldIdentity() != nil {
+				fmt.Fprintf(&sb, ", old identity: %d", i.GetOldIdentity().GetValue())
 			}
-			if i.HostIp != "" {
-				fmt.Fprintf(&sb, ", host ip: %s", i.HostIp)
+			if i.GetHostIp() != "" {
+				fmt.Fprintf(&sb, ", host ip: %s", i.GetHostIp())
 			}
-			if i.OldHostIp != "" {
-				fmt.Fprintf(&sb, ", old host ip: %s", i.OldHostIp)
+			if i.GetOldHostIp() != "" {
+				fmt.Fprintf(&sb, ", old host ip: %s", i.GetOldHostIp())
 			}
-			fmt.Fprintf(&sb, ", encrypt key: %d", i.EncryptKey)
+			fmt.Fprintf(&sb, ", encrypt key: %d", i.GetEncryptKey())
 			return sb.String()
 		}
-	case pb.AgentEventType_SERVICE_UPSERTED:
+	case flowpb.AgentEventType_SERVICE_UPSERTED:
 		if svc := e.GetServiceUpsert(); svc != nil {
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "id: %d", svc.Id)
-			if fe := svc.FrontendAddress; fe != nil {
+			fmt.Fprintf(&sb, "id: %d", svc.GetId())
+			if fe := svc.GetFrontendAddress(); fe != nil {
 				fmt.Fprintf(&sb, ", frontend: %s", formatServiceAddr(fe))
 			}
-			if bes := svc.BackendAddresses; len(bes) != 0 {
+			if bes := svc.GetBackendAddresses(); len(bes) != 0 {
 				backends := make([]string, 0, len(bes))
 				for _, a := range bes {
 					backends = append(backends, formatServiceAddr(a))
 				}
 				fmt.Fprintf(&sb, ", backends: [%s]", strings.Join(backends, ","))
 			}
-			if t := svc.Type; t != "" {
+			if t := svc.GetType(); t != "" {
 				fmt.Fprintf(&sb, ", type: %s", t)
 			}
-			if tp := svc.TrafficPolicy; tp != "" {
+			if tp := svc.GetTrafficPolicy(); tp != "" {
 				fmt.Fprintf(&sb, ", traffic policy: %s", tp)
 			}
-			if ns := svc.Namespace; ns != "" {
+			if ns := svc.GetNamespace(); ns != "" {
 				fmt.Fprintf(&sb, ", namespace: %s", ns)
 			}
-			if n := svc.Name; n != "" {
+			if n := svc.GetName(); n != "" {
 				fmt.Fprintf(&sb, ", name: %s", n)
 			}
 			return sb.String()
 		}
-	case pb.AgentEventType_SERVICE_DELETED:
+	case flowpb.AgentEventType_SERVICE_DELETED:
 		if s := e.GetServiceDelete(); s != nil {
-			return fmt.Sprintf("id: %d", s.Id)
+			return fmt.Sprintf("id: %d", s.GetId())
 		}
 	}
 	return "UNKNOWN"
@@ -515,7 +588,7 @@ func (p *Printer) WriteProtoAgentEvent(r *observerpb.GetAgentEventsResponse) err
 	}
 
 	switch p.opts.output {
-	case JSONOutput:
+	case JSONLegacyOutput:
 		return p.jsonEncoder.Encode(e)
 	case JSONPBOutput:
 		return p.jsonEncoder.Encode(r)
@@ -594,7 +667,7 @@ func fmtCPU(cpu *wrapperspb.Int32Value) string {
 	return fmt.Sprintf("%02d", cpu.GetValue())
 }
 
-func fmtEndpointShort(ep *pb.Endpoint) string {
+func fmtEndpointShort(ep *flowpb.Endpoint) string {
 	if ep == nil {
 		return "N/A"
 	}
@@ -602,7 +675,7 @@ func fmtEndpointShort(ep *pb.Endpoint) string {
 	str := fmt.Sprintf("ID: %d", ep.GetID())
 	if ns, pod := ep.GetNamespace(), ep.GetPodName(); ns != "" && pod != "" {
 		str = fmt.Sprintf("%s/%s (%s)", ns, pod, str)
-	} else if lbls := ep.GetLabels(); len(lbls) == 1 && strings.HasPrefix("reserved:", lbls[0]) {
+	} else if lbls := ep.GetLabels(); len(lbls) == 1 && strings.HasPrefix(lbls[0], "reserved:") {
 		str = fmt.Sprintf("%s (%s)", lbls[0], str)
 	}
 
@@ -617,7 +690,7 @@ func (p *Printer) WriteProtoDebugEvent(r *observerpb.GetDebugEventsResponse) err
 	}
 
 	switch p.opts.output {
-	case JSONOutput:
+	case JSONLegacyOutput:
 		return p.jsonEncoder.Encode(e)
 	case JSONPBOutput:
 		return p.jsonEncoder.Encode(r)
@@ -701,12 +774,13 @@ func (p *Printer) WriteProtoDebugEvent(r *observerpb.GetDebugEventsResponse) err
 func (p *Printer) Hostname(ip, port string, ns, pod, svc string, names []string) (host string) {
 	host = ip
 	if p.opts.enableIPTranslation {
-		if pod != "" {
+		switch {
+		case pod != "":
 			// path.Join omits the slash if ns is empty
 			host = path.Join(ns, pod)
-		} else if svc != "" {
+		case svc != "":
 			host = path.Join(ns, svc)
-		} else if len(names) != 0 {
+		case len(names) != 0:
 			host = strings.Join(names, ",")
 		}
 	}
@@ -734,4 +808,108 @@ func (p *Printer) WriteGetFlowsResponse(res *observerpb.GetFlowsResponse) error 
 		}
 		return nil
 	}
+}
+
+// WriteServerStatusResponse writes server status response into the output
+// writer.
+func (p *Printer) WriteServerStatusResponse(res *observerpb.ServerStatusResponse) error {
+	if res == nil {
+		return nil
+	}
+
+	numConnectedNodes := "N/A"
+	if n := res.GetNumConnectedNodes(); n != nil {
+		numConnectedNodes = fmt.Sprintf("%d", n.GetValue())
+	}
+	numUnavailableNodes := "N/A"
+	if n := res.GetNumUnavailableNodes(); n != nil {
+		numUnavailableNodes = fmt.Sprintf("%d", n.GetValue())
+	}
+	flowsPerSec := "N/A"
+	if fr := res.GetFlowsRate(); fr > 0 {
+		flowsPerSec = fmt.Sprintf("%.2f", fr)
+	}
+
+	switch p.opts.output {
+	case TabOutput:
+		ew := &errWriter{w: p.tw}
+		ew.write(
+			"NUM FLOWS", tab,
+			"MAX FLOWS", tab,
+			"SEEN FLOWS", tab,
+			"FLOWS PER SECOND", tab,
+			"UPTIME", tab,
+			"NUM CONNECTED NODES", tab,
+			"NUM UNAVAILABLE NODES", tab,
+			"VERSION", newline,
+			uint64Grouping(res.GetNumFlows()), tab,
+			uint64Grouping(res.GetMaxFlows()), tab,
+			uint64Grouping(res.GetSeenFlows()), tab,
+			flowsPerSec, tab,
+			formatDurationNS(res.GetUptimeNs()), tab,
+			numConnectedNodes, tab,
+			numUnavailableNodes, tab,
+			res.GetVersion(), newline,
+		)
+		if ew.err != nil {
+			return fmt.Errorf("failed to write out server status: %v", ew.err)
+		}
+	case DictOutput:
+		ew := &errWriter{w: p.opts.w}
+		ew.write(
+			"          NUM FLOWS: ", uint64Grouping(res.GetNumFlows()), newline,
+			"          MAX FLOWS: ", uint64Grouping(res.GetMaxFlows()), newline,
+			"         SEEN FLOWS: ", uint64Grouping(res.GetSeenFlows()), newline,
+			"   FLOWS PER SECOND: ", flowsPerSec, newline,
+			"             UPTIME: ", formatDurationNS(res.GetUptimeNs()), newline,
+			"NUM CONNECTED NODES: ", numConnectedNodes, newline,
+			" NUM UNAVAIL. NODES: ", numUnavailableNodes, newline,
+			"            VERSION: ", res.GetVersion(), newline,
+		)
+		if ew.err != nil {
+			return fmt.Errorf("failed to write out server status: %v", ew.err)
+		}
+	case CompactOutput:
+		ew := &errWriter{w: p.opts.w}
+		flowsRatio := ""
+		if res.GetMaxFlows() > 0 {
+			flowsRatio = fmt.Sprintf(" (%.2f%%)", (float64(res.GetNumFlows())/float64(res.GetMaxFlows()))*100)
+		}
+		ew.writef("Current/Max Flows: %v/%v%s\n", uint64Grouping(res.GetNumFlows()), uint64Grouping(res.GetMaxFlows()), flowsRatio)
+
+		if uptime := time.Duration(res.GetUptimeNs()).Seconds(); flowsPerSec == "N/A" && uptime > 0 {
+			flowsPerSec = fmt.Sprintf("%.2f", float64(res.GetSeenFlows())/uptime)
+		}
+		ew.writef("Flows/s: %s\n", flowsPerSec)
+
+		numConnected := res.GetNumConnectedNodes()
+		numUnavailable := res.GetNumUnavailableNodes()
+		if numConnected != nil {
+			total := ""
+			if numUnavailable != nil {
+				total = fmt.Sprintf("/%d", numUnavailable.GetValue()+numConnected.GetValue())
+			}
+			ew.writef("Connected Nodes: %d%s\n", numConnected.GetValue(), total)
+		}
+		if numUnavailable != nil && numUnavailable.GetValue() > 0 {
+			if unavailable := res.GetUnavailableNodes(); unavailable != nil {
+				sort.Strings(unavailable) // it's nicer when displaying unavailable nodes list
+				if numUnavailable.GetValue() > uint32(len(unavailable)) {
+					unavailable = append(unavailable, fmt.Sprintf("and %d more...", numUnavailable.GetValue()-uint32(len(unavailable))))
+				}
+				ew.writef("Unavailable Nodes: %d\n  - %s\n",
+					numUnavailable.GetValue(),
+					strings.Join(unavailable, "\n  - "),
+				)
+			} else {
+				ew.writef("Unavailable Nodes: %d\n", numUnavailable.GetValue())
+			}
+		}
+		if ew.err != nil {
+			return fmt.Errorf("failed to write out server status: %v", ew.err)
+		}
+	case JSONPBOutput:
+		return p.jsonEncoder.Encode(res)
+	}
+	return nil
 }

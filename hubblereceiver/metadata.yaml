@@ -1,0 +1,7 @@
+type: hubble
+
+status:
+  class: receiver
+  stability:
+    stable: [traces]
+    beta: [logs]

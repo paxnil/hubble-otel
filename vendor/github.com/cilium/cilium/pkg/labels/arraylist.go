@@ -1,16 +1,5 @@
-// Copyright 2018 Authors of Cilium
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of Cilium
 
 package labels
 
@@ -65,4 +54,38 @@ func (ls LabelArrayList) Sort() LabelArrayList {
 	})
 
 	return ls
+}
+
+// Merge incorporates new LabelArrays into an existing LabelArrayList, without
+// introducing duplicates, returning the result for convenience. Existing
+// duplication in either list is not removed.
+func (lsp *LabelArrayList) Merge(include ...LabelArray) LabelArrayList {
+	lsp.Sort()
+	incl := LabelArrayList(include).Sort()
+	return lsp.MergeSorted(incl)
+}
+
+// MergeSorted incorporates new labels from 'include' to the receiver,
+// both of which must be already sorted.
+// LabelArrays are inserted from 'include' to the receiver as needed.
+func (lsp *LabelArrayList) MergeSorted(include LabelArrayList) LabelArrayList {
+	merged := *lsp
+	i := 0
+	for j := 0; i < len(include) && j < len(merged); j++ {
+		if include[i].Less(merged[j]) {
+			merged = append(merged[:j+1], merged[j:]...) // make space at merged[j]
+			merged[j] = include[i]
+			i++
+		} else if include[i].Equals(merged[j]) {
+			i++
+		}
+	}
+
+	// 'include' may have more entries after original labels have been exhausted
+	if i < len(include) {
+		merged = append(merged, include[i:]...)
+	}
+
+	*lsp = merged
+	return *lsp
 }

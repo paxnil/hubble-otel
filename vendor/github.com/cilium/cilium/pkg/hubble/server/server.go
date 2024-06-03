@@ -1,17 +1,5 @@
-// Copyright 2020 Authors of Hubble
-// Copyright 2020 Authors of Cilium
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of Hubble
 
 package server
 
@@ -19,18 +7,17 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"net"
-
-	observerpb "github.com/cilium/cilium/api/v1/observer"
-	peerpb "github.com/cilium/cilium/api/v1/peer"
-	recorderpb "github.com/cilium/cilium/api/v1/recorder"
-	"github.com/cilium/cilium/pkg/hubble/server/serveroption"
 
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
+
+	observerpb "github.com/cilium/cilium/api/v1/observer"
+	peerpb "github.com/cilium/cilium/api/v1/peer"
+	recorderpb "github.com/cilium/cilium/api/v1/recorder"
+	"github.com/cilium/cilium/pkg/hubble/server/serveroption"
 )
 
 var (
@@ -50,7 +37,7 @@ func NewServer(log logrus.FieldLogger, options ...serveroption.Option) (*Server,
 	opts := serveroption.Options{}
 	for _, opt := range options {
 		if err := opt(&opts); err != nil {
-			return nil, fmt.Errorf("failed to apply option: %v", err)
+			return nil, fmt.Errorf("failed to apply option: %w", err)
 		}
 	}
 	if opts.Listener == nil {
@@ -59,22 +46,31 @@ func NewServer(log logrus.FieldLogger, options ...serveroption.Option) (*Server,
 	if opts.ServerTLSConfig == nil && !opts.Insecure {
 		return nil, errNoServerTLSConfig
 	}
-	return &Server{log: log, opts: opts}, nil
+
+	s := &Server{log: log, opts: opts}
+	if err := s.initGRPCServer(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func (s *Server) newGRPCServer() (*grpc.Server, error) {
-	switch {
-	case s.opts.Insecure:
-		return grpc.NewServer(), nil
-	case s.opts.ServerTLSConfig != nil:
-		tlsConfig := s.opts.ServerTLSConfig.ServerConfig(&tls.Config{
-			MinVersion: tls.VersionTLS13,
-		})
-		creds := credentials.NewTLS(tlsConfig)
-		return grpc.NewServer(grpc.Creds(creds)), nil
-	default:
-		return nil, errNoServerTLSConfig
+	var opts []grpc.ServerOption
+	for _, interceptor := range s.opts.GRPCUnaryInterceptors {
+		opts = append(opts, grpc.UnaryInterceptor(interceptor))
 	}
+	for _, interceptor := range s.opts.GRPCStreamInterceptors {
+		opts = append(opts, grpc.StreamInterceptor(interceptor))
+	}
+	if s.opts.ServerTLSConfig != nil {
+		// NOTE: gosec is unable to resolve the constant and warns about "TLS
+		// MinVersion too low".
+		tlsConfig := s.opts.ServerTLSConfig.ServerConfig(&tls.Config{ //nolint:gosec
+			MinVersion: serveroption.MinTLSVersion,
+		})
+		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
+	}
+	return grpc.NewServer(opts...), nil
 }
 
 func (s *Server) initGRPCServer() error {
@@ -94,26 +90,18 @@ func (s *Server) initGRPCServer() error {
 	if s.opts.RecorderService != nil {
 		recorderpb.RegisterRecorderServer(srv, s.opts.RecorderService)
 	}
+	reflection.Register(srv)
+	if s.opts.GRPCMetrics != nil {
+		s.opts.GRPCMetrics.InitializeMetrics(srv)
+	}
 	s.srv = srv
-	reflection.Register(s.srv)
 	return nil
 }
 
 // Serve starts the hubble server and accepts new connections on the configured
 // listener. Stop should be called to stop the server.
 func (s *Server) Serve() error {
-	if err := s.initGRPCServer(); err != nil {
-		return err
-	}
-	if s.opts.Listener == nil {
-		return errNoListener
-	}
-	go func(listener net.Listener) {
-		if err := s.srv.Serve(s.opts.Listener); err != nil {
-			s.log.WithError(err).WithField("address", listener.Addr().String()).Error("Failed to start gRPC server")
-		}
-	}(s.opts.Listener)
-	return nil
+	return s.srv.Serve(s.opts.Listener)
 }
 
 // Stop stops the hubble server.

@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 // Keep the original Uber license.
 
@@ -35,9 +24,16 @@
 // THE SOFTWARE.
 
 //go:build linux
-// +build linux
 
 package cgroups // import "go.opentelemetry.io/collector/internal/cgroups"
+import (
+	"bufio"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
 
 const (
 	// _cgroupFSType is the Linux CGroup file system type used in
@@ -53,11 +49,19 @@ const (
 	_cgroupSubsysMemory = "memory"
 
 	_cgroupMemoryLimitBytes = "memory.limit_in_bytes"
+
+	// _cgroupv2MemoryMax is the file name for the CGroup-V2 Memory max
+	// parameter.
+	_cgroupv2MemoryMax = "memory.max"
+	// _cgroupFSType is the Linux CGroup-V2 file system type used in
+	// `/proc/$PID/mountinfo`.
+	_cgroupv2FSType = "cgroup2"
 )
 
 const (
-	_procPathCGroup    = "/proc/self/cgroup"
-	_procPathMountInfo = "/proc/self/mountinfo"
+	_procPathCGroup     = "/proc/self/cgroup"
+	_procPathMountInfo  = "/proc/self/mountinfo"
+	_cgroupv2MountPoint = "/sys/fs/cgroup"
 )
 
 // CGroups is a map that associates each CGroup with its subsystem name.
@@ -88,7 +92,9 @@ func NewCGroups(procPathMountInfo, procPathCGroup string) (CGroups, error) {
 			if err != nil {
 				return err
 			}
-			cgroups[opt] = NewCGroup(cgroupPath)
+			if strings.HasPrefix(cgroupPath, "/sys") {
+				cgroups[opt] = NewCGroup(cgroupPath)
+			}
 		}
 
 		return nil
@@ -106,7 +112,7 @@ func NewCGroupsForCurrentProcess() (CGroups, error) {
 	return NewCGroups(_procPathMountInfo, _procPathCGroup)
 }
 
-// MemoryQuota returns the total memory a
+// MemoryQuota returns the total memory limit of the process
 // It is a result of `memory.limit_in_bytes`. If the value of
 // `memory.limit_in_bytes` was not set (-1) or (9223372036854771712), the method returns `(-1, false, nil)`.
 func (cg CGroups) MemoryQuota() (int64, bool, error) {
@@ -119,5 +125,58 @@ func (cg CGroups) MemoryQuota() (int64, bool, error) {
 	if defined := memLimitBytes > 0; err != nil || !defined {
 		return -1, defined, err
 	}
-	return int64(memLimitBytes), true, nil
+	return memLimitBytes, true, nil
+}
+
+// IsCGroupV2 returns true if the system supports and uses cgroup2.
+// It gets the required information for deciding from mountinfo file.
+func IsCGroupV2() (bool, error) {
+	return isCGroupV2(_procPathMountInfo)
+}
+
+func isCGroupV2(procPathMountInfo string) (bool, error) {
+	isV2 := false
+	newMountPoint := func(mp *MountPoint) error {
+		if mp.FSType == _cgroupv2FSType && mp.MountPoint == _cgroupv2MountPoint {
+			isV2 = true
+		}
+		return nil
+	}
+	if err := parseMountInfo(procPathMountInfo, newMountPoint); err != nil {
+		return false, err
+	}
+	return isV2, nil
+}
+
+// MemoryQuotaV2 returns the total memory limit of the process
+// It is a result of cgroupv2 `memory.max`. If the value of
+// `memory.max` was not set (max), the method returns `(-1, false, nil)`.
+func MemoryQuotaV2() (int64, bool, error) {
+	return memoryQuotaV2(_cgroupv2MountPoint, _cgroupv2MemoryMax)
+}
+
+func memoryQuotaV2(cgroupv2MountPoint, cgroupv2MemoryMax string) (int64, bool, error) {
+	memoryMaxParams, err := os.Open(filepath.Clean(filepath.Join(cgroupv2MountPoint, cgroupv2MemoryMax)))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return -1, false, nil
+		}
+		return -1, false, err
+	}
+	scanner := bufio.NewScanner(memoryMaxParams)
+	if scanner.Scan() {
+		value := strings.TrimSpace(scanner.Text())
+		if value == "max" {
+			return -1, false, nil
+		}
+		max, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return -1, false, err
+		}
+		return max, true, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return -1, false, err
+	}
+	return -1, false, io.ErrUnexpectedEOF
 }

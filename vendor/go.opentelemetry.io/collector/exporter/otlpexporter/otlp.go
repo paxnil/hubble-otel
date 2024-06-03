@@ -1,25 +1,15 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package otlpexporter // import "go.opentelemetry.io/collector/exporter/otlpexporter"
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"runtime"
 	"time"
 
+	"go.uber.org/zap"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -27,132 +17,127 @@ import (
 	"google.golang.org/grpc/status"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer/consumererror"
+	"go.opentelemetry.io/collector/exporter"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
-	"go.opentelemetry.io/collector/model/otlpgrpc"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/pmetric/pmetricotlp"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
 )
 
-type exporter struct {
+type baseExporter struct {
 	// Input configuration.
 	config *Config
-	w      *grpcSender
+
+	// gRPC clients and connection.
+	traceExporter  ptraceotlp.GRPCClient
+	metricExporter pmetricotlp.GRPCClient
+	logExporter    plogotlp.GRPCClient
+	clientConn     *grpc.ClientConn
+	metadata       metadata.MD
+	callOptions    []grpc.CallOption
+
+	settings component.TelemetrySettings
+
+	// Default user-agent header.
+	userAgent string
 }
 
-// Crete new exporter and start it. The exporter will begin connecting but
-// this function may return before the connection is established.
-func newExporter(cfg config.Exporter) (*exporter, error) {
+func newExporter(cfg component.Config, set exporter.CreateSettings) *baseExporter {
 	oCfg := cfg.(*Config)
 
-	if oCfg.Endpoint == "" {
-		return nil, errors.New("OTLP exporter config requires an Endpoint")
-	}
+	userAgent := fmt.Sprintf("%s/%s (%s/%s)",
+		set.BuildInfo.Description, set.BuildInfo.Version, runtime.GOOS, runtime.GOARCH)
 
-	return &exporter{config: oCfg}, nil
+	return &baseExporter{config: oCfg, settings: set.TelemetrySettings, userAgent: userAgent}
 }
 
 // start actually creates the gRPC connection. The client construction is deferred till this point as this
 // is the only place we get hold of Extensions which are required to construct auth round tripper.
-func (e *exporter) start(_ context.Context, host component.Host) (err error) {
-	e.w, err = newGrpcSender(e.config, host)
+func (e *baseExporter) start(ctx context.Context, host component.Host) (err error) {
+	if e.clientConn, err = e.config.ClientConfig.ToClientConn(ctx, host, e.settings, grpc.WithUserAgent(e.userAgent)); err != nil {
+		return err
+	}
+	e.traceExporter = ptraceotlp.NewGRPCClient(e.clientConn)
+	e.metricExporter = pmetricotlp.NewGRPCClient(e.clientConn)
+	e.logExporter = plogotlp.NewGRPCClient(e.clientConn)
+	headers := map[string]string{}
+	for k, v := range e.config.ClientConfig.Headers {
+		headers[k] = string(v)
+	}
+	e.metadata = metadata.New(headers)
+	e.callOptions = []grpc.CallOption{
+		grpc.WaitForReady(e.config.ClientConfig.WaitForReady),
+	}
+
 	return
 }
 
-func (e *exporter) shutdown(context.Context) error {
-	return e.w.stop()
-}
-
-func (e *exporter) pushTraces(ctx context.Context, td pdata.Traces) error {
-	if err := e.w.exportTrace(ctx, td); err != nil {
-		return fmt.Errorf("failed to push trace data via OTLP exporter: %w", err)
+func (e *baseExporter) shutdown(context.Context) error {
+	if e.clientConn != nil {
+		return e.clientConn.Close()
 	}
 	return nil
 }
 
-func (e *exporter) pushMetrics(ctx context.Context, md pdata.Metrics) error {
-	if err := e.w.exportMetrics(ctx, md); err != nil {
-		return fmt.Errorf("failed to push metrics data via OTLP exporter: %w", err)
+func (e *baseExporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
+	req := ptraceotlp.NewExportRequestFromTraces(td)
+	resp, respErr := e.traceExporter.Export(e.enhanceContext(ctx), req, e.callOptions...)
+	if err := processError(respErr); err != nil {
+		return err
+	}
+	partialSuccess := resp.PartialSuccess()
+	if !(partialSuccess.ErrorMessage() == "" && partialSuccess.RejectedSpans() == 0) {
+		e.settings.Logger.Warn("Partial success response",
+			zap.String("message", resp.PartialSuccess().ErrorMessage()),
+			zap.Int64("dropped_spans", resp.PartialSuccess().RejectedSpans()),
+		)
 	}
 	return nil
 }
 
-func (e *exporter) pushLogs(ctx context.Context, ld pdata.Logs) error {
-	if err := e.w.exportLogs(ctx, ld); err != nil {
-		return fmt.Errorf("failed to push log data via OTLP exporter: %w", err)
+func (e *baseExporter) pushMetrics(ctx context.Context, md pmetric.Metrics) error {
+	req := pmetricotlp.NewExportRequestFromMetrics(md)
+	resp, respErr := e.metricExporter.Export(e.enhanceContext(ctx), req, e.callOptions...)
+	if err := processError(respErr); err != nil {
+		return err
+	}
+	partialSuccess := resp.PartialSuccess()
+	if !(partialSuccess.ErrorMessage() == "" && partialSuccess.RejectedDataPoints() == 0) {
+		e.settings.Logger.Warn("Partial success response",
+			zap.String("message", resp.PartialSuccess().ErrorMessage()),
+			zap.Int64("dropped_data_points", resp.PartialSuccess().RejectedDataPoints()),
+		)
 	}
 	return nil
 }
 
-type grpcSender struct {
-	// gRPC clients and connection.
-	traceExporter  otlpgrpc.TracesClient
-	metricExporter otlpgrpc.MetricsClient
-	logExporter    otlpgrpc.LogsClient
-	clientConn     *grpc.ClientConn
-	metadata       metadata.MD
-	callOptions    []grpc.CallOption
-}
-
-func newGrpcSender(config *Config, host component.Host) (*grpcSender, error) {
-	dialOpts, err := config.GRPCClientSettings.ToDialOptions(host)
-	if err != nil {
-		return nil, err
+func (e *baseExporter) pushLogs(ctx context.Context, ld plog.Logs) error {
+	req := plogotlp.NewExportRequestFromLogs(ld)
+	resp, respErr := e.logExporter.Export(e.enhanceContext(ctx), req, e.callOptions...)
+	if err := processError(respErr); err != nil {
+		return err
 	}
-
-	var clientConn *grpc.ClientConn
-	if clientConn, err = grpc.Dial(config.GRPCClientSettings.SanitizedEndpoint(), dialOpts...); err != nil {
-		return nil, err
+	partialSuccess := resp.PartialSuccess()
+	if !(partialSuccess.ErrorMessage() == "" && partialSuccess.RejectedLogRecords() == 0) {
+		e.settings.Logger.Warn("Partial success response",
+			zap.String("message", resp.PartialSuccess().ErrorMessage()),
+			zap.Int64("dropped_log_records", resp.PartialSuccess().RejectedLogRecords()),
+		)
 	}
-
-	gs := &grpcSender{
-		traceExporter:  otlpgrpc.NewTracesClient(clientConn),
-		metricExporter: otlpgrpc.NewMetricsClient(clientConn),
-		logExporter:    otlpgrpc.NewLogsClient(clientConn),
-		clientConn:     clientConn,
-		metadata:       metadata.New(config.GRPCClientSettings.Headers),
-		callOptions: []grpc.CallOption{
-			grpc.WaitForReady(config.GRPCClientSettings.WaitForReady),
-		},
-	}
-	return gs, nil
+	return nil
 }
 
-func (gs *grpcSender) stop() error {
-	return gs.clientConn.Close()
-}
-
-func (gs *grpcSender) exportTrace(ctx context.Context, td pdata.Traces) error {
-	req := otlpgrpc.NewTracesRequest()
-	req.SetTraces(td)
-	_, err := gs.traceExporter.Export(gs.enhanceContext(ctx), req, gs.callOptions...)
-	return processError(err)
-}
-
-func (gs *grpcSender) exportMetrics(ctx context.Context, md pdata.Metrics) error {
-	req := otlpgrpc.NewMetricsRequest()
-	req.SetMetrics(md)
-	_, err := gs.metricExporter.Export(gs.enhanceContext(ctx), req, gs.callOptions...)
-	return processError(err)
-}
-
-func (gs *grpcSender) exportLogs(ctx context.Context, ld pdata.Logs) error {
-	req := otlpgrpc.NewLogsRequest()
-	req.SetLogs(ld)
-	_, err := gs.logExporter.Export(gs.enhanceContext(ctx), req, gs.callOptions...)
-	return processError(err)
-}
-
-func (gs *grpcSender) enhanceContext(ctx context.Context) context.Context {
-	if gs.metadata.Len() > 0 {
-		return metadata.NewOutgoingContext(ctx, gs.metadata)
+func (e *baseExporter) enhanceContext(ctx context.Context) context.Context {
+	if e.metadata.Len() > 0 {
+		return metadata.NewOutgoingContext(ctx, e.metadata)
 	}
 	return ctx
 }
 
-// Send a trace or metrics request to the server. "perform" function is expected to make
-// the actual gRPC unary call that sends the request. This function implements the
-// common OTLP logic around request handling such as retries and throttling.
 func processError(err error) error {
 	if err == nil {
 		// Request is successful, we are done.
@@ -160,7 +145,6 @@ func processError(err error) error {
 	}
 
 	// We have an error, check gRPC status code.
-
 	st := status.Convert(err)
 	if st.Code() == codes.OK {
 		// Not really an error, still success.
@@ -169,67 +153,59 @@ func processError(err error) error {
 
 	// Now, this is this a real error.
 
-	if !shouldRetry(st.Code()) {
+	retryInfo := getRetryInfo(st)
+
+	if !shouldRetry(st.Code(), retryInfo) {
 		// It is not a retryable error, we should not retry.
 		return consumererror.NewPermanent(err)
 	}
 
-	// Need to retry.
-
 	// Check if server returned throttling information.
-	throttleDuration := getThrottleDuration(st)
+	throttleDuration := getThrottleDuration(retryInfo)
 	if throttleDuration != 0 {
+		// We are throttled. Wait before retrying as requested by the server.
 		return exporterhelper.NewThrottleRetry(err, throttleDuration)
 	}
+
+	// Need to retry.
 
 	return err
 }
 
-func shouldRetry(code codes.Code) bool {
+func shouldRetry(code codes.Code, retryInfo *errdetails.RetryInfo) bool {
 	switch code {
-	case codes.OK:
-		// Success. This function should not be called for this code, the best we
-		// can do is tell the caller not to retry.
-		return false
-
 	case codes.Canceled,
 		codes.DeadlineExceeded,
-		codes.PermissionDenied,
-		codes.Unauthenticated,
-		codes.ResourceExhausted,
 		codes.Aborted,
 		codes.OutOfRange,
 		codes.Unavailable,
 		codes.DataLoss:
 		// These are retryable errors.
 		return true
-
-	case codes.Unknown,
-		codes.InvalidArgument,
-		codes.NotFound,
-		codes.AlreadyExists,
-		codes.FailedPrecondition,
-		codes.Unimplemented,
-		codes.Internal:
-		// These are fatal errors, don't retry.
-		return false
-
-	default:
-		// Don't retry on unknown codes.
-		return false
+	case codes.ResourceExhausted:
+		// Retry only if RetryInfo was supplied by the server.
+		// This indicates that the server can still recover from resource exhaustion.
+		return retryInfo != nil
 	}
+	// Don't retry on any other code.
+	return false
 }
 
-func getThrottleDuration(status *status.Status) time.Duration {
-	// See if throttling information is available.
+func getRetryInfo(status *status.Status) *errdetails.RetryInfo {
 	for _, detail := range status.Details() {
 		if t, ok := detail.(*errdetails.RetryInfo); ok {
-			if t.RetryDelay.Seconds > 0 || t.RetryDelay.Nanos > 0 {
-				// We are throttled. Wait before retrying as requested by the server.
-				return time.Duration(t.RetryDelay.Seconds)*time.Second + time.Duration(t.RetryDelay.Nanos)*time.Nanosecond
-			}
-			return 0
+			return t
 		}
+	}
+	return nil
+}
+
+func getThrottleDuration(t *errdetails.RetryInfo) time.Duration {
+	if t == nil || t.RetryDelay == nil {
+		return 0
+	}
+	if t.RetryDelay.Seconds > 0 || t.RetryDelay.Nanos > 0 {
+		return time.Duration(t.RetryDelay.Seconds)*time.Second + time.Duration(t.RetryDelay.Nanos)*time.Nanosecond
 	}
 	return 0
 }

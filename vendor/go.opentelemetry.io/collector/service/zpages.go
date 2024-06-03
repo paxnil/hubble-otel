@@ -1,157 +1,99 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package service // import "go.opentelemetry.io/collector/service"
 
 import (
 	"net/http"
 	"path"
-	"sort"
-
-	otelzpages "go.opentelemetry.io/contrib/zpages"
+	"runtime"
+	"time"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/internal/version"
+	"go.opentelemetry.io/collector/featuregate"
 	"go.opentelemetry.io/collector/service/internal/zpages"
 )
 
 const (
-	tracezPath     = "tracez"
-	servicezPath   = "servicez"
-	pipelinezPath  = "pipelinez"
-	extensionzPath = "extensionz"
-
-	zPipelineName  = "zpipelinename"
-	zComponentName = "zcomponentname"
-	zComponentKind = "zcomponentkind"
-	zExtensionName = "zextensionname"
+	// Paths
+	zServicePath   = "servicez"
+	zPipelinePath  = "pipelinez"
+	zExtensionPath = "extensionz"
+	zFeaturePath   = "featurez"
 )
 
-func (srv *service) RegisterZPages(mux *http.ServeMux, pathPrefix string) {
-	mux.Handle(path.Join(pathPrefix, tracezPath), otelzpages.NewTracezHandler(srv.zPagesSpanProcessor))
-	mux.HandleFunc(path.Join(pathPrefix, servicezPath), srv.handleServicezRequest)
-	mux.HandleFunc(path.Join(pathPrefix, pipelinezPath), srv.handlePipelinezRequest)
-	mux.HandleFunc(path.Join(pathPrefix, extensionzPath), func(w http.ResponseWriter, r *http.Request) {
-		handleExtensionzRequest(srv, w, r)
-	})
+var (
+	// InfoVar is a singleton instance of the Info struct.
+	runtimeInfoVar [][2]string
+)
+
+func init() {
+	runtimeInfoVar = [][2]string{
+		{"StartTimestamp", time.Now().String()},
+		{"Go", runtime.Version()},
+		{"OS", runtime.GOOS},
+		{"Arch", runtime.GOARCH},
+		// Add other valuable runtime information here.
+	}
 }
 
-func (srv *service) handleServicezRequest(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm() // nolint:errcheck
+func (host *serviceHost) RegisterZPages(mux *http.ServeMux, pathPrefix string) {
+	mux.HandleFunc(path.Join(pathPrefix, zServicePath), host.zPagesRequest)
+	mux.HandleFunc(path.Join(pathPrefix, zPipelinePath), host.pipelines.HandleZPages)
+	mux.HandleFunc(path.Join(pathPrefix, zExtensionPath), host.serviceExtensions.HandleZPages)
+	mux.HandleFunc(path.Join(pathPrefix, zFeaturePath), handleFeaturezRequest)
+}
+
+func (host *serviceHost) zPagesRequest(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	zpages.WriteHTMLHeader(w, zpages.HeaderData{Title: "service"})
+	zpages.WriteHTMLPageHeader(w, zpages.HeaderData{Title: "Service " + host.buildInfo.Command})
+	zpages.WriteHTMLPropertiesTable(w, zpages.PropertiesTableData{Name: "Build Info", Properties: getBuildInfoProperties(host.buildInfo)})
+	zpages.WriteHTMLPropertiesTable(w, zpages.PropertiesTableData{Name: "Runtime Info", Properties: runtimeInfoVar})
 	zpages.WriteHTMLComponentHeader(w, zpages.ComponentHeaderData{
 		Name:              "Pipelines",
-		ComponentEndpoint: pipelinezPath,
+		ComponentEndpoint: zPipelinePath,
 		Link:              true,
 	})
 	zpages.WriteHTMLComponentHeader(w, zpages.ComponentHeaderData{
 		Name:              "Extensions",
-		ComponentEndpoint: extensionzPath,
+		ComponentEndpoint: zExtensionPath,
 		Link:              true,
 	})
-	zpages.WriteHTMLPropertiesTable(w, zpages.PropertiesTableData{Name: "Build And Runtime", Properties: version.RuntimeVar()})
-	zpages.WriteHTMLFooter(w)
+	zpages.WriteHTMLComponentHeader(w, zpages.ComponentHeaderData{
+		Name:              "Features",
+		ComponentEndpoint: zFeaturePath,
+		Link:              true,
+	})
+	zpages.WriteHTMLPageFooter(w)
 }
 
-func (srv *service) handlePipelinezRequest(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm() // nolint:errcheck
+func handleFeaturezRequest(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	pipelineName := r.Form.Get(zPipelineName)
-	componentName := r.Form.Get(zComponentName)
-	componentKind := r.Form.Get(zComponentKind)
-	zpages.WriteHTMLHeader(w, zpages.HeaderData{Title: "Pipelines"})
-	zpages.WriteHTMLPipelinesSummaryTable(w, srv.getPipelinesSummaryTableData())
-	if pipelineName != "" && componentName != "" && componentKind != "" {
-		fullName := componentName
-		if componentKind == "processor" {
-			fullName = pipelineName + "/" + componentName
-		}
-		zpages.WriteHTMLComponentHeader(w, zpages.ComponentHeaderData{
-			Name: componentKind + ": " + fullName,
-		})
-		// TODO: Add config + status info.
-	}
-	zpages.WriteHTMLFooter(w)
+	zpages.WriteHTMLPageHeader(w, zpages.HeaderData{Title: "Feature Gates"})
+	zpages.WriteHTMLFeaturesTable(w, getFeaturesTableData())
+	zpages.WriteHTMLPageFooter(w)
 }
 
-func (srv *service) getPipelinesSummaryTableData() zpages.SummaryPipelinesTableData {
-	data := zpages.SummaryPipelinesTableData{
-		ComponentEndpoint: pipelinezPath,
-	}
-
-	data.Rows = make([]zpages.SummaryPipelinesTableRowData, 0, len(srv.builtPipelines))
-	for c, p := range srv.builtPipelines {
-		// TODO: Change the template to use ID.
-		var recvs []string
-		for _, recvID := range c.Receivers {
-			recvs = append(recvs, recvID.String())
-		}
-		var procs []string
-		for _, procID := range c.Processors {
-			procs = append(procs, procID.String())
-		}
-		var exps []string
-		for _, expID := range c.Exporters {
-			exps = append(exps, expID.String())
-		}
-		row := zpages.SummaryPipelinesTableRowData{
-			FullName:    c.Name,
-			InputType:   string(c.InputType),
-			MutatesData: p.MutatesData,
-			Receivers:   recvs,
-			Processors:  procs,
-			Exporters:   exps,
-		}
-		data.Rows = append(data.Rows, row)
-	}
-
-	sort.Slice(data.Rows, func(i, j int) bool {
-		return data.Rows[i].FullName < data.Rows[j].FullName
+func getFeaturesTableData() zpages.FeatureGateTableData {
+	data := zpages.FeatureGateTableData{}
+	featuregate.GlobalRegistry().VisitAll(func(gate *featuregate.Gate) {
+		data.Rows = append(data.Rows, zpages.FeatureGateTableRowData{
+			ID:           gate.ID(),
+			Enabled:      gate.IsEnabled(),
+			Description:  gate.Description(),
+			Stage:        gate.Stage().String(),
+			FromVersion:  gate.FromVersion(),
+			ToVersion:    gate.ToVersion(),
+			ReferenceURL: gate.ReferenceURL(),
+		})
 	})
 	return data
 }
 
-func handleExtensionzRequest(host component.Host, w http.ResponseWriter, r *http.Request) {
-	r.ParseForm() // nolint:errcheck
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	extensionName := r.Form.Get(zExtensionName)
-	zpages.WriteHTMLHeader(w, zpages.HeaderData{Title: "Extensions"})
-	zpages.WriteHTMLExtensionsSummaryTable(w, getExtensionsSummaryTableData(host))
-	if extensionName != "" {
-		zpages.WriteHTMLComponentHeader(w, zpages.ComponentHeaderData{
-			Name: extensionName,
-		})
-		// TODO: Add config + status info.
+func getBuildInfoProperties(buildInfo component.BuildInfo) [][2]string {
+	return [][2]string{
+		{"Command", buildInfo.Command},
+		{"Description", buildInfo.Description},
+		{"Version", buildInfo.Version},
 	}
-	zpages.WriteHTMLFooter(w)
-}
-
-func getExtensionsSummaryTableData(host component.Host) zpages.SummaryExtensionsTableData {
-	data := zpages.SummaryExtensionsTableData{
-		ComponentEndpoint: extensionzPath,
-	}
-
-	extensions := host.GetExtensions()
-	data.Rows = make([]zpages.SummaryExtensionsTableRowData, 0, len(extensions))
-	for c := range extensions {
-		row := zpages.SummaryExtensionsTableRowData{FullName: c.Name()}
-		data.Rows = append(data.Rows, row)
-	}
-
-	sort.Slice(data.Rows, func(i, j int) bool {
-		return data.Rows[i].FullName < data.Rows[j].FullName
-	})
-	return data
 }

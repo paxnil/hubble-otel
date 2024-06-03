@@ -9,4 +9,4 @@ root_dir="$(cd "${script_dir}/.." && pwd)"
 
 export GOPATH="${GOPATH:-"${root_dir}/.gopath"}"
 
-${GOPATH}/bin/builder --config "${root_dir}/images/otelcol/builder.yaml" --output-path "${script_dir}/otelcol-hubble"
+${GOPATH}/bin/ocb --config "${root_dir}/images/otelcol/builder.yaml" --output-path "${script_dir}/otelcol-hubble"

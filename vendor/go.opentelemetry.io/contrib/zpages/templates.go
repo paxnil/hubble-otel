@@ -1,4 +1,6 @@
 // Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
 // Copyright 2017, OpenCensus Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,12 +16,12 @@
 // limitations under the License.
 //
 
-package zpages
+package zpages // import "go.opentelemetry.io/contrib/zpages"
 
 import (
 	"fmt"
 	"html/template"
-	"io/ioutil"
+	"io"
 	"log"
 
 	"go.opentelemetry.io/contrib/zpages/internal"
@@ -42,18 +44,18 @@ type headerData struct {
 }
 
 func parseTemplate(name string) *template.Template {
-	f, err := internal.FS(false).Open("/templates/" + name + ".html")
+	f, err := internal.Templates.Open("templates/" + name + ".html")
 	if err != nil {
-		log.Panicf("%v: %v", name, err)
+		log.Panicf("%v: %v", name, err) // nolint: revive  // Called during initialization.
 	}
 	defer func() {
 		if err = f.Close(); err != nil {
-			log.Panicf("%v: %v", name, err)
+			log.Panicf("%v: %v", name, err) // nolint: revive  // Called during initialization.
 		}
 	}()
-	text, err := ioutil.ReadAll(f)
+	text, err := io.ReadAll(f)
 	if err != nil {
-		log.Panicf("%v: %v", name, err)
+		log.Panicf("%v: %v", name, err) // nolint: revive  // Called during initialization.
 	}
 	return template.Must(template.New(name).Funcs(templateFunctions).Parse(string(text)))
 }
@@ -66,10 +68,21 @@ func spanRowFormatter(r spanRow) template.HTML {
 	if r.SpanContext.IsSampled() {
 		col = "blue"
 	}
+
+	tpl := fmt.Sprintf(
+		`trace_id: <b style="color:%s">%s</b> span_id: %s`,
+		col,
+		r.SpanContext.TraceID(),
+		r.SpanContext.SpanID(),
+	)
 	if r.ParentSpanContext.IsValid() {
-		return template.HTML(fmt.Sprintf(`trace_id: <b style="color:%s">%s</b> span_id: %s parent_span_id: %s`, col, r.SpanContext.TraceID(), r.SpanContext.SpanID(), r.ParentSpanContext.SpanID()))
+		tpl += fmt.Sprintf(` parent_span_id: %s`, r.ParentSpanContext.SpanID())
 	}
-	return template.HTML(fmt.Sprintf(`trace_id: <b style="color:%s">%s</b> span_id: %s`, col, r.SpanContext.TraceID(), r.SpanContext.SpanID()))
+
+	//nolint:gosec // G203: None of the dynamic attributes (TraceID/SpanID) can
+	// contain characters that need escaping so this lint issue is a false
+	// positive.
+	return template.HTML(tpl)
 }
 
 func even(x int) bool {

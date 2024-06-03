@@ -829,26 +829,21 @@ func (s *levelsController) subcompact(it y.Iterator, kr keyRange, cd compactDef,
 			continue
 		}
 		numBuilds++
-		fileID := s.reserveFileID()
 		if err := inflightBuilders.Do(); err != nil {
 			// Can't return from here, until I decrRef all the tables that I built so far.
 			break
 		}
-		go func(builder *table.Builder) {
+		go func(builder *table.Builder, fileID uint64) {
 			var err error
 			defer inflightBuilders.Done(err)
 			defer builder.Close()
-
-			build := func(fileID uint64) (*table.Table, error) {
-				fname := table.NewFilename(fileID, s.kv.opt.Dir)
-				return table.CreateTable(fname, builder)
-			}
 
 			var tbl *table.Table
 			if s.kv.opt.InMemory {
 				tbl, err = table.OpenInMemoryTable(builder.Finish(), fileID, &bopts)
 			} else {
-				tbl, err = build(fileID)
+				fname := table.NewFilename(fileID, s.kv.opt.Dir)
+				tbl, err = table.CreateTable(fname, builder)
 			}
 
 			// If we couldn't build the table, return fast.
@@ -856,7 +851,7 @@ func (s *levelsController) subcompact(it y.Iterator, kr keyRange, cd compactDef,
 				return
 			}
 			res <- tbl
-		}(builder)
+		}(builder, s.reserveFileID())
 	}
 	s.kv.vlog.updateDiscardStats(discardStats)
 	s.kv.opt.Debugf("Discard stats: %v", discardStats)
@@ -1124,8 +1119,22 @@ func (s *levelsController) fillTablesL0ToL0(cd *compactDef) bool {
 	cd.nextRange = keyRange{}
 	cd.bot = nil
 
-	cd.lockLevels()
-	defer cd.unlockLevels()
+	// Because this level and next level are both level 0, we should NOT acquire
+	// the read lock twice, because it can result in a deadlock. So, we don't
+	// call compactDef.lockLevels, instead locking the level only once and
+	// directly here.
+	//
+	// As per godocs on RWMutex:
+	// If a goroutine holds a RWMutex for reading and another goroutine might
+	// call Lock, no goroutine should expect to be able to acquire a read lock
+	// until the initial read lock is released. In particular, this prohibits
+	// recursive read locking. This is to ensure that the lock eventually
+	// becomes available; a blocked Lock call excludes new readers from
+	// acquiring the lock.
+	y.AssertTrue(cd.thisLevel.level == 0)
+	y.AssertTrue(cd.nextLevel.level == 0)
+	s.levels[0].RLock()
+	defer s.levels[0].RUnlock()
 
 	s.cstatus.Lock()
 	defer s.cstatus.Unlock()

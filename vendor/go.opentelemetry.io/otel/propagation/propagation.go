@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package propagation // import "go.opentelemetry.io/otel/propagation"
 
@@ -38,6 +27,32 @@ type TextMapCarrier interface {
 	Keys() []string
 	// DO NOT CHANGE: any modification will not be backwards compatible and
 	// must never be done outside of a new major release.
+}
+
+// MapCarrier is a TextMapCarrier that uses a map held in memory as a storage
+// medium for propagated key-value pairs.
+type MapCarrier map[string]string
+
+// Compile time check that MapCarrier implements the TextMapCarrier.
+var _ TextMapCarrier = MapCarrier{}
+
+// Get returns the value associated with the passed key.
+func (c MapCarrier) Get(key string) string {
+	return c[key]
+}
+
+// Set stores the key-value pair.
+func (c MapCarrier) Set(key, value string) {
+	c[key] = value
+}
+
+// Keys lists the keys stored in this carrier.
+func (c MapCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for k := range c {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // HeaderCarrier adapts http.Header to satisfy the TextMapCarrier interface.

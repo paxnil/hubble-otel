@@ -1,4 +1,6 @@
 // Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
 // Copyright 2017, OpenCensus Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +15,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package zpages
+package zpages // import "go.opentelemetry.io/contrib/zpages"
 
 import (
 	"fmt"

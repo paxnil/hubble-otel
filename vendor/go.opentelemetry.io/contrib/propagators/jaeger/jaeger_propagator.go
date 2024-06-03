@@ -1,18 +1,7 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
-package jaeger
+package jaeger // import "go.opentelemetry.io/contrib/propagators/jaeger"
 
 import (
 	"context"
@@ -28,11 +17,10 @@ import (
 const (
 	jaegerHeader        = "uber-trace-id"
 	separator           = ":"
-	traceID64bitsWidth  = 64 / 4
 	traceID128bitsWidth = 128 / 4
 	spanIDWidth         = 64 / 4
 
-	traceIDPadding = "0000000000000000"
+	idPaddingChar = "0"
 
 	flagsDebug      = 0x02
 	flagsSampled    = 0x01
@@ -56,7 +44,7 @@ var (
 //
 // Jaeger format:
 //
-// uber-trace-id: {trace-id}:{span-id}:{parent-span-id}:{flags}
+// uber-trace-id: {trace-id}:{span-id}:{parent-span-id}:{flags}.
 type Jaeger struct{}
 
 var _ propagation.TextMapPropagator = &Jaeger{}
@@ -108,12 +96,13 @@ func extract(ctx context.Context, headerVal string) (context.Context, trace.Span
 	// extract trace ID
 	if parts[0] != "" {
 		id := parts[0]
-		if len(id) != traceID128bitsWidth && len(id) != traceID64bitsWidth {
+		if len(id) > traceID128bitsWidth {
 			return ctx, empty, errInvalidTraceIDLength
 		}
-		// padding when length is 16
-		if len(id) == traceID64bitsWidth {
-			id = traceIDPadding + id
+		// padding when length is less than 32
+		if len(id) < traceID128bitsWidth {
+			padCharCount := traceID128bitsWidth - len(id)
+			id = strings.Repeat(idPaddingChar, padCharCount) + id
 		}
 		scc.TraceID, err = trace.TraceIDFromHex(id)
 		if err != nil {
@@ -124,8 +113,13 @@ func extract(ctx context.Context, headerVal string) (context.Context, trace.Span
 	// extract span ID
 	if parts[1] != "" {
 		id := parts[1]
-		if len(id) != spanIDWidth {
+		if len(id) > spanIDWidth {
 			return ctx, empty, errInvalidSpanIDLength
+		}
+		// padding when length is less than 16
+		if len(id) < spanIDWidth {
+			padCharCount := spanIDWidth - len(id)
+			id = strings.Repeat(idPaddingChar, padCharCount) + id
 		}
 		scc.SpanID, err = trace.SpanIDFromHex(id)
 		if err != nil {
@@ -156,6 +150,7 @@ func extract(ctx context.Context, headerVal string) (context.Context, trace.Span
 	return ctx, trace.NewSpanContext(scc), nil
 }
 
+// Fields returns the Jaeger header key whose value is set with Inject.
 func (jaeger Jaeger) Fields() []string {
 	return []string{jaegerHeader}
 }

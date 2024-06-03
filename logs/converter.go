@@ -63,8 +63,8 @@ func (c *FlowConverter) Convert(hubbleResp *observer.GetFlowsResponse) (protoref
 		Resource: &resourceV1.Resource{
 			Attributes: common.GetAllResourceAttributes(flow, c.fallbackServiceNamePrefix),
 		},
-		InstrumentationLibraryLogs: []*logsV1.InstrumentationLibraryLogs{{
-			Logs: []*logsV1.LogRecord{logRecord},
+		ScopeLogs: []*logsV1.ScopeLogs{{
+			LogRecords: []*logsV1.LogRecord{logRecord},
 		}},
 	}
 

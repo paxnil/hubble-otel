@@ -1,22 +1,12 @@
-// Copyright 2018-2019 Authors of Cilium
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of Cilium
 
 package counter
 
 import (
 	"fmt"
 	"net"
+	"net/netip"
 
 	"github.com/cilium/cilium/pkg/lock"
 )
@@ -45,22 +35,29 @@ func NewPrefixLengthCounter(maxUniquePrefixes6, maxUniquePrefixes4 int) *PrefixL
 	}
 }
 
-// This is a bit ugly, but there's not a great way to define an IPNet without
-// parsing strings, etc.
-func createIPNet(ones, bits int) *net.IPNet {
-	return &net.IPNet{
-		Mask: net.CIDRMask(ones, bits),
+func createIPNet(ones, bits int) netip.Prefix {
+	var addr netip.Addr
+	switch bits {
+	case net.IPv4len * 8:
+		addr = netip.IPv4Unspecified()
+	case net.IPv6len * 8:
+		addr = netip.IPv6Unspecified()
+	default:
+		// fall through to default library error
 	}
+	return netip.PrefixFrom(addr, ones)
 }
 
 // DefaultPrefixLengthCounter creates a default prefix length counter that
 // already counts the minimum and maximum prefix lengths for IP hosts and
-// default routes (ie, /32 and /0). As with NewPrefixLengthCounter, inesrtions
+// default routes (ie, /32 and /0). As with NewPrefixLengthCounter, insertions
 // are limited to the specified maximum number of unique prefix lengths.
-func DefaultPrefixLengthCounter(maxUniquePrefixes6, maxUniquePrefixes4 int) *PrefixLengthCounter {
-	counter := NewPrefixLengthCounter(maxUniquePrefixes6, maxUniquePrefixes4)
+func DefaultPrefixLengthCounter() *PrefixLengthCounter {
+	maxIPv4 := net.IPv4len*8 + 1
+	maxIPv6 := net.IPv6len*8 + 1
+	counter := NewPrefixLengthCounter(maxIPv6, maxIPv4)
 
-	defaultPrefixes := []*net.IPNet{
+	defaultPrefixes := []netip.Prefix{
 		// IPv4
 		createIPNet(0, net.IPv4len*8),             // world
 		createIPNet(net.IPv4len*8, net.IPv4len*8), // hosts
@@ -70,7 +67,7 @@ func DefaultPrefixLengthCounter(maxUniquePrefixes6, maxUniquePrefixes4 int) *Pre
 		createIPNet(net.IPv6len*8, net.IPv6len*8), // hosts
 	}
 	if _, err := counter.Add(defaultPrefixes); err != nil {
-		panic(fmt.Errorf("Failed to create default prefix lengths: %s", err))
+		panic(fmt.Errorf("Failed to create default prefix lengths: %w", err))
 	}
 
 	return counter
@@ -93,7 +90,7 @@ func checkLimits(current, newCount, max int) error {
 //
 // Returns true if adding these prefixes results in an increase in the total
 // number of unique prefix lengths in the counter.
-func (p *PrefixLengthCounter) Add(prefixes []*net.IPNet) (bool, error) {
+func (p *PrefixLengthCounter) Add(prefixes []netip.Prefix) (bool, error) {
 	p.Lock()
 	defer p.Unlock()
 
@@ -103,7 +100,8 @@ func (p *PrefixLengthCounter) Add(prefixes []*net.IPNet) (bool, error) {
 	newV4Prefixes := false
 	newV6Prefixes := false
 	for _, prefix := range prefixes {
-		ones, bits := prefix.Mask.Size()
+		ones := prefix.Bits()
+		bits := prefix.Addr().BitLen()
 
 		switch bits {
 		case net.IPv4len * 8:
@@ -141,12 +139,13 @@ func (p *PrefixLengthCounter) Add(prefixes []*net.IPNet) (bool, error) {
 // the counter. Returns true if removing references to these prefix lengths
 // would result in a decrese in the total number of unique prefix lengths in
 // the counter.
-func (p *PrefixLengthCounter) Delete(prefixes []*net.IPNet) (changed bool) {
+func (p *PrefixLengthCounter) Delete(prefixes []netip.Prefix) (changed bool) {
 	p.Lock()
 	defer p.Unlock()
 
 	for _, prefix := range prefixes {
-		ones, bits := prefix.Mask.Size()
+		ones := prefix.Bits()
+		bits := prefix.Addr().BitLen()
 		switch bits {
 		case net.IPv4len * 8:
 			if p.v4.Delete(ones) {

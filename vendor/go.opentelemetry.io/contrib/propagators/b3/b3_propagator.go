@@ -1,18 +1,7 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
-package b3
+package b3 // import "go.opentelemetry.io/contrib/propagators/b3"
 
 import (
 	"context"
@@ -52,8 +41,8 @@ var (
 	errInvalidSpanIDHeader       = errors.New("invalid B3 spanID header found")
 	errInvalidParentSpanIDHeader = errors.New("invalid B3 ParentSpanID header found")
 	errInvalidScope              = errors.New("require either both traceID and spanID or none")
-	errInvalidScopeParent        = errors.New("ParentSpanID requires both traceID and spanID to be available")
-	errInvalidScopeParentSingle  = errors.New("ParentSpanID requires traceID, spanID and Sampled to be available")
+	errInvalidScopeParent        = errors.New("traceID and spanID required for ParentSpanID")
+	errInvalidScopeParentSingle  = errors.New("traceID, spanID and Sampled required for ParentSpanID")
 	errEmptyContext              = errors.New("empty request context")
 	errInvalidTraceIDValue       = errors.New("invalid B3 traceID value found")
 	errInvalidSpanIDValue        = errors.New("invalid B3 spanID value found")
@@ -70,13 +59,14 @@ var _ propagation.TextMapPropagator = propagator{}
 // B3 propagator serializes SpanContext to/from B3 Headers.
 // This propagator supports both versions of B3 headers,
 //  1. Single Header:
-//    b3: {TraceId}-{SpanId}-{SamplingState}-{ParentSpanId}
+//     b3: {TraceId}-{SpanId}-{SamplingState}-{ParentSpanId}
 //  2. Multiple Headers:
-//    x-b3-traceid: {TraceId}
-//    x-b3-parentspanid: {ParentSpanId}
-//    x-b3-spanid: {SpanId}
-//    x-b3-sampled: {SamplingState}
-//    x-b3-flags: {DebugFlag}
+//     x-b3-traceid: {TraceId}
+//     x-b3-parentspanid: {ParentSpanId}
+//     x-b3-spanid: {SpanId}
+//     x-b3-sampled: {SamplingState}
+//     x-b3-flags: {DebugFlag}
+//
 // The Single Header propagator is used by default.
 func New(opts ...Option) propagation.TextMapPropagator {
 	cfg := newConfig(opts...)
@@ -259,23 +249,25 @@ func extractSingle(ctx context.Context, contextHeader string) (context.Context, 
 
 	headerLen := len(contextHeader)
 
-	if headerLen == samplingWidth {
+	switch {
+	case headerLen == samplingWidth:
 		sampling = contextHeader
-	} else if headerLen == traceID64BitsWidth || headerLen == traceID128BitsWidth {
+	case headerLen == traceID64BitsWidth || headerLen == traceID128BitsWidth:
 		// Trace ID by itself is invalid.
 		return ctx, empty, errInvalidScope
-	} else if headerLen >= traceID64BitsWidth+spanIDWidth+separatorWidth {
+	case headerLen >= traceID64BitsWidth+spanIDWidth+separatorWidth:
 		pos := 0
 		var traceID string
-		if string(contextHeader[traceID64BitsWidth]) == "-" {
+		switch {
+		case string(contextHeader[traceID64BitsWidth]) == "-":
 			// traceID must be 64 bits
 			pos += traceID64BitsWidth // {traceID}
 			traceID = b3TraceIDPadding + string(contextHeader[0:pos])
-		} else if string(contextHeader[32]) == "-" {
+		case string(contextHeader[32]) == "-":
 			// traceID must be 128 bits
 			pos += traceID128BitsWidth // {traceID}
 			traceID = string(contextHeader[0:pos])
-		} else {
+		default:
 			return ctx, empty, errInvalidTraceIDValue
 		}
 		var err error
@@ -298,12 +290,13 @@ func extractSingle(ctx context.Context, contextHeader string) (context.Context, 
 			}
 			pos += separatorWidth // {traceID}-{spanID}-
 
-			if headerLen == pos+samplingWidth {
+			switch {
+			case headerLen == pos+samplingWidth:
 				sampling = string(contextHeader[pos])
-			} else if headerLen == pos+parentSpanIDWidth {
+			case headerLen == pos+parentSpanIDWidth:
 				// {traceID}-{spanID}-{parentSpanID} is invalid.
 				return ctx, empty, errInvalidScopeParentSingle
-			} else if headerLen == pos+samplingWidth+separatorWidth+parentSpanIDWidth {
+			case headerLen == pos+samplingWidth+separatorWidth+parentSpanIDWidth:
 				sampling = string(contextHeader[pos])
 				pos += samplingWidth + separatorWidth // {traceID}-{spanID}-{sampling}-
 
@@ -313,11 +306,11 @@ func extractSingle(ctx context.Context, contextHeader string) (context.Context, 
 				if err != nil {
 					return ctx, empty, errInvalidParentSpanIDValue
 				}
-			} else {
+			default:
 				return ctx, empty, errInvalidParentSpanIDValue
 			}
 		}
-	} else {
+	default:
 		return ctx, empty, errInvalidTraceIDValue
 	}
 	switch sampling {

@@ -1,61 +1,163 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
-package prometheusreceiver
+package prometheusreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusreceiver"
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"net/url"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	commonconfig "github.com/prometheus/common/config"
 	promconfig "github.com/prometheus/prometheus/config"
-	"github.com/prometheus/prometheus/discovery/file"
+	promHTTP "github.com/prometheus/prometheus/discovery/http"
 	"github.com/prometheus/prometheus/discovery/kubernetes"
-	"github.com/prometheus/prometheus/discovery/targetgroup"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/confmap"
 	"gopkg.in/yaml.v2"
-)
-
-const (
-	// The key for Prometheus scraping configs.
-	prometheusConfigKey = "config"
 )
 
 // Config defines configuration for Prometheus receiver.
 type Config struct {
-	config.ReceiverSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct
-	PrometheusConfig        *promconfig.Config       `mapstructure:"-"`
-	BufferPeriod            time.Duration            `mapstructure:"buffer_period"`
-	BufferCount             int                      `mapstructure:"buffer_count"`
-	UseStartTimeMetric      bool                     `mapstructure:"use_start_time_metric"`
-	StartTimeMetricRegex    string                   `mapstructure:"start_time_metric_regex"`
+	PrometheusConfig   *PromConfig `mapstructure:"config"`
+	TrimMetricSuffixes bool        `mapstructure:"trim_metric_suffixes"`
+	// UseStartTimeMetric enables retrieving the start time of all counter metrics
+	// from the process_start_time_seconds metric. This is only correct if all counters on that endpoint
+	// started after the process start time, and the process is the only actor exporting the metric after
+	// the process started. It should not be used in "exporters" which export counters that may have
+	// started before the process itself. Use only if you know what you are doing, as this may result
+	// in incorrect rate calculations.
+	UseStartTimeMetric   bool   `mapstructure:"use_start_time_metric"`
+	StartTimeMetricRegex string `mapstructure:"start_time_metric_regex"`
 
-	// ConfigPlaceholder is just an entry to make the configuration pass a check
-	// that requires that all keys present in the config actually exist on the
-	// structure, ie.: it will error if an unknown key is present.
-	ConfigPlaceholder interface{} `mapstructure:"config"`
+	// ReportExtraScrapeMetrics - enables reporting of additional metrics for Prometheus client like scrape_body_size_bytes
+	ReportExtraScrapeMetrics bool `mapstructure:"report_extra_scrape_metrics"`
+
+	TargetAllocator *TargetAllocator `mapstructure:"target_allocator"`
 }
 
-var _ config.Receiver = (*Config)(nil)
-var _ config.Unmarshallable = (*Config)(nil)
+// Validate checks the receiver configuration is valid.
+func (cfg *Config) Validate() error {
+	if (cfg.PrometheusConfig == nil || len(cfg.PrometheusConfig.ScrapeConfigs) == 0) && cfg.TargetAllocator == nil {
+		return errors.New("no Prometheus scrape_configs or target_allocator set")
+	}
+	return nil
+}
+
+type TargetAllocator struct {
+	confighttp.ClientConfig `mapstructure:",squash"`
+	Interval                time.Duration     `mapstructure:"interval"`
+	CollectorID             string            `mapstructure:"collector_id"`
+	HTTPSDConfig            *PromHTTPSDConfig `mapstructure:"http_sd_config"`
+}
+
+func (cfg *TargetAllocator) Validate() error {
+	// ensure valid endpoint
+	if _, err := url.ParseRequestURI(cfg.Endpoint); err != nil {
+		return fmt.Errorf("TargetAllocator endpoint is not valid: %s", cfg.Endpoint)
+	}
+	// ensure valid collectorID without variables
+	if cfg.CollectorID == "" || strings.Contains(cfg.CollectorID, "${") {
+		return fmt.Errorf("CollectorID is not a valid ID")
+	}
+
+	return nil
+}
+
+// PromConfig is a redeclaration of promconfig.Config because we need custom unmarshaling
+// as prometheus "config" uses `yaml` tags.
+type PromConfig promconfig.Config
+
+var _ confmap.Unmarshaler = (*PromConfig)(nil)
+
+func (cfg *PromConfig) Unmarshal(componentParser *confmap.Conf) error {
+	cfgMap := componentParser.ToStringMap()
+	if len(cfgMap) == 0 {
+		return nil
+	}
+	return unmarshalYAML(cfgMap, (*promconfig.Config)(cfg))
+}
+
+func (cfg *PromConfig) Validate() error {
+	// Reject features that Prometheus supports but that the receiver doesn't support:
+	// See:
+	// * https://github.com/open-telemetry/opentelemetry-collector/issues/3863
+	// * https://github.com/open-telemetry/wg-prometheus/issues/3
+	unsupportedFeatures := make([]string, 0, 4)
+	if len(cfg.RemoteWriteConfigs) != 0 {
+		unsupportedFeatures = append(unsupportedFeatures, "remote_write")
+	}
+	if len(cfg.RemoteReadConfigs) != 0 {
+		unsupportedFeatures = append(unsupportedFeatures, "remote_read")
+	}
+	if len(cfg.RuleFiles) != 0 {
+		unsupportedFeatures = append(unsupportedFeatures, "rule_files")
+	}
+	if len(cfg.AlertingConfig.AlertRelabelConfigs) != 0 {
+		unsupportedFeatures = append(unsupportedFeatures, "alert_config.relabel_configs")
+	}
+	if len(cfg.AlertingConfig.AlertmanagerConfigs) != 0 {
+		unsupportedFeatures = append(unsupportedFeatures, "alert_config.alertmanagers")
+	}
+	if len(unsupportedFeatures) != 0 {
+		// Sort the values for deterministic error messages.
+		sort.Strings(unsupportedFeatures)
+		return fmt.Errorf("unsupported features:\n\t%s", strings.Join(unsupportedFeatures, "\n\t"))
+	}
+
+	for _, sc := range cfg.ScrapeConfigs {
+		if sc.HTTPClientConfig.Authorization != nil {
+			if err := checkFile(sc.HTTPClientConfig.Authorization.CredentialsFile); err != nil {
+				return fmt.Errorf("error checking authorization credentials file %q: %w", sc.HTTPClientConfig.Authorization.CredentialsFile, err)
+			}
+		}
+
+		if err := checkTLSConfig(sc.HTTPClientConfig.TLSConfig); err != nil {
+			return err
+		}
+
+		for _, c := range sc.ServiceDiscoveryConfigs {
+			if c, ok := c.(*kubernetes.SDConfig); ok {
+				if err := checkTLSConfig(c.HTTPClientConfig.TLSConfig); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// PromHTTPSDConfig is a redeclaration of promHTTP.SDConfig because we need custom unmarshaling
+// as prometheus "config" uses `yaml` tags.
+type PromHTTPSDConfig promHTTP.SDConfig
+
+var _ confmap.Unmarshaler = (*PromHTTPSDConfig)(nil)
+
+func (cfg *PromHTTPSDConfig) Unmarshal(componentParser *confmap.Conf) error {
+	cfgMap := componentParser.ToStringMap()
+	if len(cfgMap) == 0 {
+		return nil
+	}
+	cfgMap["url"] = "http://placeholder" // we have to set it as else marshaling will fail
+	return unmarshalYAML(cfgMap, (*promHTTP.SDConfig)(cfg))
+}
+
+func unmarshalYAML(in map[string]any, out any) error {
+	yamlOut, err := yaml.Marshal(in)
+	if err != nil {
+		return fmt.Errorf("prometheus receiver: failed to marshal config to yaml: %w", err)
+	}
+
+	err = yaml.UnmarshalStrict(yamlOut, out)
+	if err != nil {
+		return fmt.Errorf("prometheus receiver: failed to unmarshal yaml to prometheus config object: %w", err)
+	}
+	return nil
+}
 
 func checkFile(fn string) error {
 	// Nothing set, nothing to error on.
@@ -68,167 +170,10 @@ func checkFile(fn string) error {
 
 func checkTLSConfig(tlsConfig commonconfig.TLSConfig) error {
 	if err := checkFile(tlsConfig.CertFile); err != nil {
-		return fmt.Errorf("error checking client cert file %q - %v", tlsConfig.CertFile, err)
+		return fmt.Errorf("error checking client cert file %q: %w", tlsConfig.CertFile, err)
 	}
 	if err := checkFile(tlsConfig.KeyFile); err != nil {
-		return fmt.Errorf("error checking client key file %q - %v", tlsConfig.KeyFile, err)
+		return fmt.Errorf("error checking client key file %q: %w", tlsConfig.KeyFile, err)
 	}
-	if len(tlsConfig.CertFile) > 0 && len(tlsConfig.KeyFile) == 0 {
-		return fmt.Errorf("client cert file %q specified without client key file", tlsConfig.CertFile)
-	}
-	if len(tlsConfig.KeyFile) > 0 && len(tlsConfig.CertFile) == 0 {
-		return fmt.Errorf("client key file %q specified without client cert file", tlsConfig.KeyFile)
-	}
-	return nil
-}
-
-// Method to exercise the prometheus file discovery behavior to ensure there are no errors
-// - reference https://github.com/prometheus/prometheus/blob/c0c22ed04200a8d24d1d5719f605c85710f0d008/discovery/file/file.go#L372
-func checkSDFile(filename string) error {
-	fd, err := os.Open(filename)
-	if err != nil {
-		return err
-	}
-	defer fd.Close()
-
-	content, err := ioutil.ReadAll(fd)
-	if err != nil {
-		return err
-	}
-
-	var targetGroups []*targetgroup.Group
-
-	switch ext := filepath.Ext(filename); strings.ToLower(ext) {
-	case ".json":
-		if err := json.Unmarshal(content, &targetGroups); err != nil {
-			return fmt.Errorf("Error in unmarshaling json file extension - %v", err)
-		}
-	case ".yml", ".yaml":
-		if err := yaml.UnmarshalStrict(content, &targetGroups); err != nil {
-			return fmt.Errorf("Error in unmarshaling yaml file extension - %v", err)
-		}
-	default:
-		return fmt.Errorf("invalid file extension: %q", ext)
-	}
-
-	for i, tg := range targetGroups {
-		if tg == nil {
-			return fmt.Errorf("nil target group item found (index %d)", i)
-		}
-	}
-	return nil
-}
-
-// Validate checks the receiver configuration is valid.
-func (cfg *Config) Validate() error {
-	promConfig := cfg.PrometheusConfig
-	if promConfig == nil {
-		return nil // noop receiver
-	}
-	if len(promConfig.ScrapeConfigs) == 0 {
-		return errors.New("no Prometheus scrape_configs")
-	}
-
-	// Reject features that Prometheus supports but that the receiver doesn't support:
-	// See:
-	// * https://github.com/open-telemetry/opentelemetry-collector/issues/3863
-	// * https://github.com/open-telemetry/wg-prometheus/issues/3
-	unsupportedFeatures := make([]string, 0, 4)
-	if len(promConfig.RemoteWriteConfigs) != 0 {
-		unsupportedFeatures = append(unsupportedFeatures, "remote_write")
-	}
-	if len(promConfig.RemoteReadConfigs) != 0 {
-		unsupportedFeatures = append(unsupportedFeatures, "remote_read")
-	}
-	if len(promConfig.RuleFiles) != 0 {
-		unsupportedFeatures = append(unsupportedFeatures, "rule_files")
-	}
-	if len(promConfig.AlertingConfig.AlertRelabelConfigs) != 0 {
-		unsupportedFeatures = append(unsupportedFeatures, "alert_config.relabel_configs")
-	}
-	if len(promConfig.AlertingConfig.AlertmanagerConfigs) != 0 {
-		unsupportedFeatures = append(unsupportedFeatures, "alert_config.alertmanagers")
-	}
-	if len(unsupportedFeatures) != 0 {
-		// Sort the values for deterministic error messages.
-		sort.Strings(unsupportedFeatures)
-		return fmt.Errorf("unsupported features:\n\t%s", strings.Join(unsupportedFeatures, "\n\t"))
-	}
-
-	for _, sc := range cfg.PrometheusConfig.ScrapeConfigs {
-		for _, rc := range sc.MetricRelabelConfigs {
-			if rc.TargetLabel == "__name__" {
-				// TODO(#2297): Remove validation after renaming is fixed
-				return fmt.Errorf("error validating scrapeconfig for job %v: %w", sc.JobName, errRenamingDisallowed)
-			}
-		}
-
-		if sc.HTTPClientConfig.Authorization != nil {
-			if err := checkFile(sc.HTTPClientConfig.Authorization.CredentialsFile); err != nil {
-				return fmt.Errorf("error checking authorization credentials file %q - %s", sc.HTTPClientConfig.Authorization.CredentialsFile, err)
-			}
-		}
-
-		if err := checkTLSConfig(sc.HTTPClientConfig.TLSConfig); err != nil {
-			return err
-		}
-
-		for _, c := range sc.ServiceDiscoveryConfigs {
-			switch c := c.(type) {
-			case *kubernetes.SDConfig:
-				if err := checkTLSConfig(c.HTTPClientConfig.TLSConfig); err != nil {
-					return err
-				}
-			case *file.SDConfig:
-				for _, file := range c.Files {
-					files, err := filepath.Glob(file)
-					if err != nil {
-						return err
-					}
-					if len(files) != 0 {
-						for _, f := range files {
-							err = checkSDFile(f)
-							if err != nil {
-								return fmt.Errorf("checking SD file %q: %v", file, err)
-							}
-						}
-						continue
-					}
-					return fmt.Errorf("file %q for file_sd in scrape job %q does not exist", file, sc.JobName)
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// Unmarshal a config.Parser into the config struct.
-func (cfg *Config) Unmarshal(componentParser *config.Map) error {
-	if componentParser == nil {
-		return nil
-	}
-	// We need custom unmarshaling because prometheus "config" subkey defines its own
-	// YAML unmarshaling routines so we need to do it explicitly.
-
-	err := componentParser.UnmarshalExact(cfg)
-	if err != nil {
-		return fmt.Errorf("prometheus receiver failed to parse config: %s", err)
-	}
-
-	// Unmarshal prometheus's config values. Since prometheus uses `yaml` tags, so use `yaml`.
-	promCfg, err := componentParser.Sub(prometheusConfigKey)
-	if err != nil || len(promCfg.ToStringMap()) == 0 {
-		return err
-	}
-	out, err := yaml.Marshal(promCfg.ToStringMap())
-	if err != nil {
-		return fmt.Errorf("prometheus receiver failed to marshal config to yaml: %s", err)
-	}
-
-	err = yaml.UnmarshalStrict(out, &cfg.PrometheusConfig)
-	if err != nil {
-		return fmt.Errorf("prometheus receiver failed to unmarshal yaml to prometheus config: %s", err)
-	}
-
 	return nil
 }

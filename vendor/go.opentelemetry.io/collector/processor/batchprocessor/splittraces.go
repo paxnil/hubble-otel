@@ -1,66 +1,53 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package batchprocessor // import "go.opentelemetry.io/collector/processor/batchprocessor"
 
 import (
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
 // splitTraces removes spans from the input trace and returns a new trace of the specified size.
-func splitTraces(size int, src pdata.Traces) pdata.Traces {
+func splitTraces(size int, src ptrace.Traces) ptrace.Traces {
 	if src.SpanCount() <= size {
 		return src
 	}
 	totalCopiedSpans := 0
-	dest := pdata.NewTraces()
+	dest := ptrace.NewTraces()
 
-	src.ResourceSpans().RemoveIf(func(srcRs pdata.ResourceSpans) bool {
+	src.ResourceSpans().RemoveIf(func(srcRs ptrace.ResourceSpans) bool {
 		// If we are done skip everything else.
 		if totalCopiedSpans == size {
 			return false
 		}
 
 		// If it fully fits
-		srcRsCount := resourceSpamsCount(srcRs)
-		if (totalCopiedSpans + srcRsCount) <= size {
-			totalCopiedSpans += srcRsCount
+		srcRsSC := resourceSC(srcRs)
+		if (totalCopiedSpans + srcRsSC) <= size {
+			totalCopiedSpans += srcRsSC
 			srcRs.MoveTo(dest.ResourceSpans().AppendEmpty())
 			return true
 		}
 
 		destRs := dest.ResourceSpans().AppendEmpty()
 		srcRs.Resource().CopyTo(destRs.Resource())
-
-		srcRs.InstrumentationLibrarySpans().RemoveIf(func(srcIls pdata.InstrumentationLibrarySpans) bool {
+		srcRs.ScopeSpans().RemoveIf(func(srcIls ptrace.ScopeSpans) bool {
 			// If we are done skip everything else.
 			if totalCopiedSpans == size {
 				return false
 			}
 
 			// If possible to move all metrics do that.
-			srcSpansLen := srcIls.Spans().Len()
-			if size-totalCopiedSpans >= srcSpansLen {
-				totalCopiedSpans += srcSpansLen
-				srcIls.MoveTo(destRs.InstrumentationLibrarySpans().AppendEmpty())
+			srcIlsSC := srcIls.Spans().Len()
+			if size-totalCopiedSpans >= srcIlsSC {
+				totalCopiedSpans += srcIlsSC
+				srcIls.MoveTo(destRs.ScopeSpans().AppendEmpty())
 				return true
 			}
 
-			destIls := destRs.InstrumentationLibrarySpans().AppendEmpty()
-			srcIls.InstrumentationLibrary().CopyTo(destIls.InstrumentationLibrary())
-
-			srcIls.Spans().RemoveIf(func(srcSpan pdata.Span) bool {
+			destIls := destRs.ScopeSpans().AppendEmpty()
+			srcIls.Scope().CopyTo(destIls.Scope())
+			srcIls.Spans().RemoveIf(func(srcSpan ptrace.Span) bool {
 				// If we are done skip everything else.
 				if totalCopiedSpans == size {
 					return false
@@ -71,16 +58,16 @@ func splitTraces(size int, src pdata.Traces) pdata.Traces {
 			})
 			return false
 		})
-		return srcRs.InstrumentationLibrarySpans().Len() == 0
+		return srcRs.ScopeSpans().Len() == 0
 	})
 
 	return dest
 }
 
-// resourceSpamsCount calculates the total number of spans.
-func resourceSpamsCount(rs pdata.ResourceSpans) (count int) {
-	for k := 0; k < rs.InstrumentationLibrarySpans().Len(); k++ {
-		count += rs.InstrumentationLibrarySpans().At(k).Spans().Len()
+// resourceSC calculates the total number of spans in the ptrace.ResourceSpans.
+func resourceSC(rs ptrace.ResourceSpans) (count int) {
+	for k := 0; k < rs.ScopeSpans().Len(); k++ {
+		count += rs.ScopeSpans().At(k).Spans().Len()
 	}
 	return
 }

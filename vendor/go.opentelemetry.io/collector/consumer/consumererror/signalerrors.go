@@ -1,126 +1,73 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package consumererror // import "go.opentelemetry.io/collector/consumer/consumererror"
 
 import (
-	"errors"
-
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 )
+
+type retryable[V ptrace.Traces | pmetric.Metrics | plog.Logs] struct {
+	error
+	data V
+}
+
+// Unwrap returns the wrapped error for functions Is and As in standard package errors.
+func (err retryable[V]) Unwrap() error {
+	return err.error
+}
+
+// Data returns the telemetry data that failed to be processed or sent.
+func (err retryable[V]) Data() V {
+	return err.data
+}
 
 // Traces is an error that may carry associated Trace data for a subset of received data
 // that failed to be processed or sent.
 type Traces struct {
-	error
-	failed pdata.Traces
+	retryable[ptrace.Traces]
 }
 
 // NewTraces creates a Traces that can encapsulate received data that failed to be processed or sent.
-func NewTraces(err error, failed pdata.Traces) error {
+func NewTraces(err error, data ptrace.Traces) error {
 	return Traces{
-		error:  err,
-		failed: failed,
+		retryable: retryable[ptrace.Traces]{
+			error: err,
+			data:  data,
+		},
 	}
-}
-
-// AsTraces finds the first error in err's chain that can be assigned to target. If such an error is found,
-// it is assigned to target and true is returned, otherwise false is returned.
-// Deprecated: Use `errors.As(err, target)` instead.
-func AsTraces(err error, target *Traces) bool {
-	if err == nil {
-		return false
-	}
-	return errors.As(err, target)
-}
-
-// GetTraces returns failed traces from the associated error.
-func (err Traces) GetTraces() pdata.Traces {
-	return err.failed
-}
-
-// Unwrap returns the wrapped error for functions Is and As in standard package errors.
-func (err Traces) Unwrap() error {
-	return err.error
 }
 
 // Logs is an error that may carry associated Log data for a subset of received data
 // that failed to be processed or sent.
 type Logs struct {
-	error
-	failed pdata.Logs
+	retryable[plog.Logs]
 }
 
 // NewLogs creates a Logs that can encapsulate received data that failed to be processed or sent.
-func NewLogs(err error, failed pdata.Logs) error {
+func NewLogs(err error, data plog.Logs) error {
 	return Logs{
-		error:  err,
-		failed: failed,
+		retryable: retryable[plog.Logs]{
+			error: err,
+			data:  data,
+		},
 	}
-}
-
-// AsLogs finds the first error in err's chain that can be assigned to target. If such an error is found,
-// it is assigned to target and true is returned, otherwise false is returned.
-// Deprecated: Use `errors.As(err, target)` instead.
-func AsLogs(err error, target *Logs) bool {
-	if err == nil {
-		return false
-	}
-	return errors.As(err, target)
-}
-
-// GetLogs returns failed logs from the associated error.
-func (err Logs) GetLogs() pdata.Logs {
-	return err.failed
-}
-
-// Unwrap returns the wrapped error for functions Is and As in standard package errors.
-func (err Logs) Unwrap() error {
-	return err.error
 }
 
 // Metrics is an error that may carry associated Metrics data for a subset of received data
 // that failed to be processed or sent.
 type Metrics struct {
-	error
-	failed pdata.Metrics
+	retryable[pmetric.Metrics]
 }
 
 // NewMetrics creates a Metrics that can encapsulate received data that failed to be processed or sent.
-func NewMetrics(err error, failed pdata.Metrics) error {
+func NewMetrics(err error, data pmetric.Metrics) error {
 	return Metrics{
-		error:  err,
-		failed: failed,
+		retryable: retryable[pmetric.Metrics]{
+			error: err,
+			data:  data,
+		},
 	}
-}
-
-// AsMetrics finds the first error in err's chain that can be assigned to target. If such an error is found,
-// it is assigned to target and true is returned, otherwise false is returned.
-// Deprecated: Use `errors.As(err, target)` instead.
-func AsMetrics(err error, target *Metrics) bool {
-	if err == nil {
-		return false
-	}
-	return errors.As(err, target)
-}
-
-// GetMetrics returns failed metrics from the associated error.
-func (err Metrics) GetMetrics() pdata.Metrics {
-	return err.failed
-}
-
-// Unwrap returns the wrapped error for functions Is and As in standard package errors.
-func (err Metrics) Unwrap() error {
-	return err.error
 }

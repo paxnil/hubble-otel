@@ -1,4 +1,6 @@
 // Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
 // Copyright 2017, OpenCensus Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +15,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package zpages
+package zpages // import "go.opentelemetry.io/contrib/zpages"
 
 import (
 	"context"
@@ -49,6 +51,7 @@ func NewSpanProcessor() *SpanProcessor {
 	return &SpanProcessor{}
 }
 
+// OnStart adds span as active and reports it with zpages.
 func (ssm *SpanProcessor) OnStart(_ context.Context, span sdktrace.ReadWriteSpan) {
 	sc := span.SpanContext()
 	if sc.IsValid() {
@@ -56,6 +59,7 @@ func (ssm *SpanProcessor) OnStart(_ context.Context, span sdktrace.ReadWriteSpan
 	}
 }
 
+// OnEnd processes all spans and reports them with zpages.
 func (ssm *SpanProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
 	sc := span.SpanContext()
 	if sc.IsValid() {
@@ -70,11 +74,13 @@ func (ssm *SpanProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
 	value.(*sampleStore).sampleSpan(span)
 }
 
+// Shutdown does nothing.
 func (ssm *SpanProcessor) Shutdown(context.Context) error {
 	// Do nothing
 	return nil
 }
 
+// ForceFlush does nothing.
 func (ssm *SpanProcessor) ForceFlush(context.Context) error {
 	// Do nothing
 	return nil

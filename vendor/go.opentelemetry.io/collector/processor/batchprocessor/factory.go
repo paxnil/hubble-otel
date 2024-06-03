@@ -1,16 +1,7 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
+
+//go:generate mdatagen metadata.yaml
 
 package batchprocessor // import "go.opentelemetry.io/collector/processor/batchprocessor"
 
@@ -19,64 +10,62 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/config/configtelemetry"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/processor/processorhelper"
+	"go.opentelemetry.io/collector/processor"
+	"go.opentelemetry.io/collector/processor/batchprocessor/internal/metadata"
 )
 
 const (
-	// The value of "type" key in configuration.
-	typeStr = "batch"
-
 	defaultSendBatchSize = uint32(8192)
 	defaultTimeout       = 200 * time.Millisecond
+
+	// defaultMetadataCardinalityLimit should be set to the number
+	// of metadata configurations the user expects to submit to
+	// the collector.
+	defaultMetadataCardinalityLimit = 1000
 )
 
 // NewFactory returns a new factory for the Batch processor.
-func NewFactory() component.ProcessorFactory {
-	return processorhelper.NewFactory(
-		typeStr,
+func NewFactory() processor.Factory {
+	return processor.NewFactory(
+		metadata.Type,
 		createDefaultConfig,
-		processorhelper.WithTraces(createTracesProcessor),
-		processorhelper.WithMetrics(createMetricsProcessor),
-		processorhelper.WithLogs(createLogsProcessor))
+		processor.WithTraces(createTraces, metadata.TracesStability),
+		processor.WithMetrics(createMetrics, metadata.MetricsStability),
+		processor.WithLogs(createLogs, metadata.LogsStability))
 }
 
-func createDefaultConfig() config.Processor {
+func createDefaultConfig() component.Config {
 	return &Config{
-		ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
-		SendBatchSize:     defaultSendBatchSize,
-		Timeout:           defaultTimeout,
+		SendBatchSize:            defaultSendBatchSize,
+		Timeout:                  defaultTimeout,
+		MetadataCardinalityLimit: defaultMetadataCardinalityLimit,
 	}
 }
 
-func createTracesProcessor(
+func createTraces(
 	_ context.Context,
-	set component.ProcessorCreateSettings,
-	cfg config.Processor,
+	set processor.CreateSettings,
+	cfg component.Config,
 	nextConsumer consumer.Traces,
-) (component.TracesProcessor, error) {
-	level := configtelemetry.GetMetricsLevelFlagValue()
-	return newBatchTracesProcessor(set, nextConsumer, cfg.(*Config), level)
+) (processor.Traces, error) {
+	return newBatchTracesProcessor(set, nextConsumer, cfg.(*Config))
 }
 
-func createMetricsProcessor(
+func createMetrics(
 	_ context.Context,
-	set component.ProcessorCreateSettings,
-	cfg config.Processor,
+	set processor.CreateSettings,
+	cfg component.Config,
 	nextConsumer consumer.Metrics,
-) (component.MetricsProcessor, error) {
-	level := configtelemetry.GetMetricsLevelFlagValue()
-	return newBatchMetricsProcessor(set, nextConsumer, cfg.(*Config), level)
+) (processor.Metrics, error) {
+	return newBatchMetricsProcessor(set, nextConsumer, cfg.(*Config))
 }
 
-func createLogsProcessor(
+func createLogs(
 	_ context.Context,
-	set component.ProcessorCreateSettings,
-	cfg config.Processor,
+	set processor.CreateSettings,
+	cfg component.Config,
 	nextConsumer consumer.Logs,
-) (component.LogsProcessor, error) {
-	level := configtelemetry.GetMetricsLevelFlagValue()
-	return newBatchLogsProcessor(set, nextConsumer, cfg.(*Config), level)
+) (processor.Logs, error) {
+	return newBatchLogsProcessor(set, nextConsumer, cfg.(*Config))
 }

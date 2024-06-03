@@ -18,14 +18,23 @@ As a result, the following parameters are also required:
 
 - `cert_file`: Path to the TLS cert to use for TLS required connections. Should
   only be used if `insecure` is set to false.
+  - `cert_pem`: Alternative to `cert_file`. Provide the certificate contents as a string instead of a filepath.
+
 - `key_file`: Path to the TLS key to use for TLS required connections. Should
   only be used if `insecure` is set to false.
+  - `key_pem`: Alternative to `key_file`. Provide the key contents as a string instead of a filepath.
 
 A certificate authority may also need to be defined:
 
 - `ca_file`: Path to the CA cert. For a client this verifies the server
   certificate. For a server this verifies client certificates. If empty uses
   system root CA. Should only be used if `insecure` is set to false.
+  - `ca_pem`: Alternative to `ca_file`. Provide the CA cert contents as a string instead of a filepath.
+
+You can also combine defining a certificate authority with the system certificate authorities.
+
+- `include_system_ca_certs_pool` (default = false): whether to load the system certificate authorities pool
+  alongside the certificate authority.
 
 Additionally you can configure TLS to be enabled but skip verifying the server's
 certificate chain. This cannot be combined with `insecure` since `insecure`
@@ -36,9 +45,31 @@ won't use TLS at all.
 
 Minimum and maximum TLS version can be set:
 
-- `min_version` (default = "1.0"): Minimum acceptable TLS version.
+__IMPORTANT__: TLS 1.0 and 1.1 are deprecated due to known vulnerabilities and should be avoided.
 
-- `max_version` (default = "1.3"): Maximum acceptable TLS version.
+- `min_version` (default = "1.2"): Minimum acceptable TLS version.
+  - options: ["1.0", "1.1", "1.2", "1.3"]
+
+- `max_version` (default = "" handled by [crypto/tls](https://github.com/golang/go/blob/ed9db1d36ad6ef61095d5941ad9ee6da7ab6d05a/src/crypto/tls/common.go#L700) - currently TLS 1.3): Maximum acceptable TLS version.
+  - options: ["1.0", "1.1", "1.2", "1.3"]
+
+Explicit cipher suites can be set. If left blank, a safe default list is used. See https://go.dev/src/crypto/tls/cipher_suites.go for a list of supported cipher suites.
+- `cipher_suites`: (default = []): List of cipher suites to use.
+
+Example:
+```
+  cipher_suites:
+    - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+    - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+    - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+```
+
+Additionally certificates may be reloaded by setting the below configuration.
+
+- `reload_interval` (optional) : ReloadInterval specifies the duration after which the certificate will be reloaded.
+   If not set, it will never be reloaded.
+   Accepts a [duration string](https://pkg.go.dev/time#ParseDuration),
+   valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
 
 How TLS/mTLS is configured depends on whether configuring the client or server.
 See below for examples.
@@ -46,12 +77,8 @@ See below for examples.
 ## Client Configuration
 
 [Exporters](https://github.com/open-telemetry/opentelemetry-collector/blob/main/exporter/README.md)
-leverage client configuration.
-
-Note that client configuration supports TLS configuration, the
-configuration parameters are also defined under `tls` like server
-configuration. For more information, see [configtls
-README](../configtls/README.md).
+leverage client configuration. The TLS configuration parameters are defined
+under `tls`, like server configuration.
 
 Beyond TLS configuration, the following setting can optionally be configured:
 

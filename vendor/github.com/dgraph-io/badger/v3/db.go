@@ -172,11 +172,6 @@ func checkAndSetOptions(opt *Options) error {
 		return ErrValueLogSize
 	}
 
-	// Return error if badger is built without cgo and compression is set to ZSTD.
-	if opt.Compression == options.ZSTD && !y.CgoEnabled {
-		return y.ErrZstdCgo
-	}
-
 	if opt.ReadOnly {
 		// Do not perform compaction in read only mode.
 		opt.CompactL0OnClose = false
@@ -564,11 +559,6 @@ func (db *DB) close() (err error) {
 	db.closers.pub.SignalAndWait()
 	db.closers.cacheHealth.Signal()
 
-	// Now close the value log.
-	if vlogErr := db.vlog.Close(); vlogErr != nil {
-		err = y.Wrap(vlogErr, "DB.Close")
-	}
-
 	// Make sure that block writer is done pushing stuff into memtable!
 	// Otherwise, you will have a race condition: we are trying to flush memtables
 	// and remove them completely, while the block / memtable writer is still
@@ -622,6 +612,11 @@ func (db *DB) close() (err error) {
 		default:
 			db.opt.Warningf("While forcing compaction on level 0: %v", err)
 		}
+	}
+
+	// Now close the value log.
+	if vlogErr := db.vlog.Close(); vlogErr != nil {
+		err = y.Wrap(vlogErr, "DB.Close")
 	}
 
 	db.opt.Infof(db.LevelsToString())
@@ -1874,17 +1869,27 @@ func (db *DB) Subscribe(ctx context.Context, cb func(kv *KVList) error, matches 
 	}
 
 	c := z.NewCloser(1)
-	recvCh, id := db.pub.newSubscriber(c, matches)
+	s := db.pub.newSubscriber(c, matches)
 	slurp := func(batch *pb.KVList) error {
 		for {
 			select {
-			case kvs := <-recvCh:
+			case kvs := <-s.sendCh:
 				batch.Kv = append(batch.Kv, kvs.Kv...)
 			default:
 				if len(batch.GetKv()) > 0 {
 					return cb(batch)
 				}
 				return nil
+			}
+		}
+	}
+
+	drain := func() {
+		for {
+			select {
+			case <-s.sendCh:
+			default:
+				return
 			}
 		}
 	}
@@ -1899,15 +1904,19 @@ func (db *DB) Subscribe(ctx context.Context, cb func(kv *KVList) error, matches 
 			return err
 		case <-ctx.Done():
 			c.Done()
-			db.pub.deleteSubscriber(id)
+			atomic.StoreUint64(s.active, 0)
+			drain()
+			db.pub.deleteSubscriber(s.id)
 			// Delete the subscriber to avoid further updates.
 			return ctx.Err()
-		case batch := <-recvCh:
+		case batch := <-s.sendCh:
 			err := slurp(batch)
 			if err != nil {
 				c.Done()
+				atomic.StoreUint64(s.active, 0)
+				drain()
 				// Delete the subscriber if there is an error by the callback.
-				db.pub.deleteSubscriber(id)
+				db.pub.deleteSubscriber(s.id)
 				return err
 			}
 		}

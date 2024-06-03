@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package otlpreceiver // import "go.opentelemetry.io/collector/receiver/otlpreceiver"
 
@@ -18,101 +7,126 @@ import (
 	"context"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/configgrpc"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/confignet"
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/internal/localhostgate"
 	"go.opentelemetry.io/collector/internal/sharedcomponent"
-	"go.opentelemetry.io/collector/receiver/receiverhelper"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/receiver/otlpreceiver/internal/metadata"
 )
 
 const (
-	typeStr = "otlp"
+	grpcPort = 4317
+	httpPort = 4318
 
-	defaultGRPCEndpoint = "0.0.0.0:4317"
-	defaultHTTPEndpoint = "0.0.0.0:4318"
-	legacyHTTPEndpoint  = "0.0.0.0:55681"
+	defaultTracesURLPath  = "/v1/traces"
+	defaultMetricsURLPath = "/v1/metrics"
+	defaultLogsURLPath    = "/v1/logs"
 )
 
 // NewFactory creates a new OTLP receiver factory.
-func NewFactory() component.ReceiverFactory {
-	return receiverhelper.NewFactory(
-		typeStr,
+func NewFactory() receiver.Factory {
+	return receiver.NewFactory(
+		metadata.Type,
 		createDefaultConfig,
-		receiverhelper.WithTraces(createTracesReceiver),
-		receiverhelper.WithMetrics(createMetricsReceiver),
-		receiverhelper.WithLogs(createLogReceiver))
+		receiver.WithTraces(createTraces, metadata.TracesStability),
+		receiver.WithMetrics(createMetrics, metadata.MetricsStability),
+		receiver.WithLogs(createLog, metadata.LogsStability),
+	)
 }
 
 // createDefaultConfig creates the default configuration for receiver.
-func createDefaultConfig() config.Receiver {
+func createDefaultConfig() component.Config {
 	return &Config{
-		ReceiverSettings: config.NewReceiverSettings(config.NewComponentID(typeStr)),
 		Protocols: Protocols{
-			GRPC: &configgrpc.GRPCServerSettings{
-				NetAddr: confignet.NetAddr{
-					Endpoint:  defaultGRPCEndpoint,
-					Transport: "tcp",
+			GRPC: &configgrpc.ServerConfig{
+				NetAddr: confignet.AddrConfig{
+					Endpoint:  localhostgate.EndpointForPort(grpcPort),
+					Transport: confignet.TransportTypeTCP,
 				},
 				// We almost write 0 bytes, so no need to tune WriteBufferSize.
 				ReadBufferSize: 512 * 1024,
 			},
-			HTTP: &confighttp.HTTPServerSettings{
-				Endpoint: defaultHTTPEndpoint,
+			HTTP: &HTTPConfig{
+				ServerConfig: &confighttp.ServerConfig{
+					Endpoint: localhostgate.EndpointForPort(httpPort),
+				},
+				TracesURLPath:  defaultTracesURLPath,
+				MetricsURLPath: defaultMetricsURLPath,
+				LogsURLPath:    defaultLogsURLPath,
 			},
 		},
 	}
 }
 
-// CreateTracesReceiver creates a  trace receiver based on provided config.
-func createTracesReceiver(
+// createTraces creates a trace receiver based on provided config.
+func createTraces(
 	_ context.Context,
-	set component.ReceiverCreateSettings,
-	cfg config.Receiver,
+	set receiver.CreateSettings,
+	cfg component.Config,
 	nextConsumer consumer.Traces,
-) (component.TracesReceiver, error) {
-	r := receivers.GetOrAdd(cfg, func() component.Component {
-		return newOtlpReceiver(cfg.(*Config), set)
-	})
-
-	if err := r.Unwrap().(*otlpReceiver).registerTraceConsumer(nextConsumer); err != nil {
+) (receiver.Traces, error) {
+	oCfg := cfg.(*Config)
+	r, err := receivers.LoadOrStore(
+		oCfg,
+		func() (*otlpReceiver, error) {
+			return newOtlpReceiver(oCfg, &set)
+		},
+		&set.TelemetrySettings,
+	)
+	if err != nil {
 		return nil, err
 	}
+
+	r.Unwrap().registerTraceConsumer(nextConsumer)
 	return r, nil
 }
 
-// CreateMetricsReceiver creates a metrics receiver based on provided config.
-func createMetricsReceiver(
+// createMetrics creates a metrics receiver based on provided config.
+func createMetrics(
 	_ context.Context,
-	set component.ReceiverCreateSettings,
-	cfg config.Receiver,
+	set receiver.CreateSettings,
+	cfg component.Config,
 	consumer consumer.Metrics,
-) (component.MetricsReceiver, error) {
-	r := receivers.GetOrAdd(cfg, func() component.Component {
-		return newOtlpReceiver(cfg.(*Config), set)
-	})
-
-	if err := r.Unwrap().(*otlpReceiver).registerMetricsConsumer(consumer); err != nil {
+) (receiver.Metrics, error) {
+	oCfg := cfg.(*Config)
+	r, err := receivers.LoadOrStore(
+		oCfg,
+		func() (*otlpReceiver, error) {
+			return newOtlpReceiver(oCfg, &set)
+		},
+		&set.TelemetrySettings,
+	)
+	if err != nil {
 		return nil, err
 	}
+
+	r.Unwrap().registerMetricsConsumer(consumer)
 	return r, nil
 }
 
-// CreateLogReceiver creates a log receiver based on provided config.
-func createLogReceiver(
+// createLog creates a log receiver based on provided config.
+func createLog(
 	_ context.Context,
-	set component.ReceiverCreateSettings,
-	cfg config.Receiver,
+	set receiver.CreateSettings,
+	cfg component.Config,
 	consumer consumer.Logs,
-) (component.LogsReceiver, error) {
-	r := receivers.GetOrAdd(cfg, func() component.Component {
-		return newOtlpReceiver(cfg.(*Config), set)
-	})
-
-	if err := r.Unwrap().(*otlpReceiver).registerLogsConsumer(consumer); err != nil {
+) (receiver.Logs, error) {
+	oCfg := cfg.(*Config)
+	r, err := receivers.LoadOrStore(
+		oCfg,
+		func() (*otlpReceiver, error) {
+			return newOtlpReceiver(oCfg, &set)
+		},
+		&set.TelemetrySettings,
+	)
+	if err != nil {
 		return nil, err
 	}
+
+	r.Unwrap().registerLogsConsumer(consumer)
 	return r, nil
 }
 
@@ -122,4 +136,4 @@ func createLogReceiver(
 // create separate objects, they must use one otlpReceiver object per configuration.
 // When the receiver is shutdown it should be removed from this map so the same configuration
 // can be recreated successfully.
-var receivers = sharedcomponent.NewSharedComponents()
+var receivers = sharedcomponent.NewMap[*Config, *otlpReceiver]()

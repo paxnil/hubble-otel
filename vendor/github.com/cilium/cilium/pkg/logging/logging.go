@@ -1,16 +1,5 @@
-// Copyright 2016-2021 Authors of Cilium
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of Cilium
 
 package logging
 
@@ -23,11 +12,12 @@ import (
 	"regexp"
 	"strings"
 	"sync/atomic"
-
-	"github.com/cilium/cilium/pkg/logging/logfields"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"k8s.io/klog/v2"
+
+	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
 type LogFormat string
@@ -37,38 +27,31 @@ const (
 	LevelOpt  = "level"
 	FormatOpt = "format"
 
-	LogFormatText LogFormat = "text"
-	LogFormatJSON LogFormat = "json"
-
-	// DefaultLogLevelStr is the string representation of DefaultLogLevel. It
-	// is used to allow for injection of the logging level via go's ldflags in
-	// unit tests, as only injection with strings via ldflags is allowed.
-	DefaultLogLevelStr string = "info"
+	LogFormatText          LogFormat = "text"
+	LogFormatTextTimestamp LogFormat = "text-ts"
+	LogFormatJSON          LogFormat = "json"
+	LogFormatJSONTimestamp LogFormat = "json-ts"
 
 	// DefaultLogFormat is the string representation of the default logrus.Formatter
 	// we want to use (possible values: text or json)
 	DefaultLogFormat LogFormat = LogFormatText
+
+	// DefaultLogFormatTimestamp is the string representation of the default logrus.Formatter
+	// including timestamps.
+	// We don't use this for general runtime logs since kubernetes log capture handles those.
+	// This is only used for applications such as CNI which is written to disk so we have no
+	// way to correlate with other logs.
+	DefaultLogFormatTimestamp LogFormat = LogFormatTextTimestamp
+
+	// DefaultLogLevel is the default log level we want to use for our logrus.Formatter
+	DefaultLogLevel logrus.Level = logrus.InfoLevel
 )
 
-var (
-	// DefaultLogger is the base logrus logger. It is different from the logrus
-	// default to avoid external dependencies from writing out unexpectedly
-	DefaultLogger = InitializeDefaultLogger()
+// DefaultLogger is the base logrus logger. It is different from the logrus
+// default to avoid external dependencies from writing out unexpectedly
+var DefaultLogger = initializeDefaultLogger()
 
-	// LevelStringToLogrusLevel maps string representations of logrus.Level into
-	// their corresponding logrus.Level.
-	LevelStringToLogrusLevel = map[string]logrus.Level{
-		"panic":   logrus.PanicLevel,
-		"error":   logrus.ErrorLevel,
-		"warning": logrus.WarnLevel,
-		"info":    logrus.InfoLevel,
-		"debug":   logrus.DebugLevel,
-	}
-
-	logOptions = LogOptions{}
-)
-
-func init() {
+func initializeKLog() {
 	log := DefaultLogger.WithField(logfields.LogSubsys, "klog")
 
 	//Create a new flag set and set error handler
@@ -98,79 +81,93 @@ func init() {
 // LogOptions maps configuration key-value pairs related to logging.
 type LogOptions map[string]string
 
-// InitializeDefaultLogger returns a logrus Logger with a custom text formatter.
-func InitializeDefaultLogger() *logrus.Logger {
-	logger := logrus.New()
-	logger.Formatter = GetFormatter(DefaultLogFormat)
-	logger.SetLevel(LevelStringToLogrusLevel[DefaultLogLevelStr])
-	return logger
-}
-
-// GetLogLevelFromConfig returns the log level provided via global
-// configuration. If the logging level is invalid, ok will be false.
-func GetLogLevelFromConfig() (logrus.Level, bool) {
-	return logOptions.GetLogLevel()
+// initializeDefaultLogger returns a logrus Logger with the default logging
+// settings.
+func initializeDefaultLogger() (logger *logrus.Logger) {
+	logger = logrus.New()
+	logger.SetFormatter(GetFormatter(DefaultLogFormatTimestamp))
+	logger.SetLevel(DefaultLogLevel)
+	return
 }
 
 // GetLogLevel returns the log level specified in the provided LogOptions. If
-// it is not set in the options, ok will be false.
-func (o LogOptions) GetLogLevel() (level logrus.Level, ok bool) {
-	level, ok = LevelStringToLogrusLevel[strings.ToLower(o[LevelOpt])]
+// it is not set in the options, it will return the default level.
+func (o LogOptions) GetLogLevel() (level logrus.Level) {
+	levelOpt, ok := o[LevelOpt]
+	if !ok {
+		return DefaultLogLevel
+	}
+
+	var err error
+	if level, err = logrus.ParseLevel(levelOpt); err != nil {
+		logrus.WithError(err).Warning("Ignoring user-configured log level")
+		return DefaultLogLevel
+	}
+
 	return
 }
 
 // GetLogFormat returns the log format specified in the provided LogOptions. If
-// it is not set in the options or is invalid, ok will be false.
+// it is not set in the options or is invalid, it will return the default format.
 func (o LogOptions) GetLogFormat() LogFormat {
 	formatOpt, ok := o[FormatOpt]
 	if !ok {
-		return DefaultLogFormat
+		return DefaultLogFormatTimestamp
 	}
 
-	re := regexp.MustCompile(`^(text|json)$`)
+	formatOpt = strings.ToLower(formatOpt)
+	re := regexp.MustCompile(`^(text|text-ts|json|json-ts)$`)
 	if !re.MatchString(formatOpt) {
-		logrus.Errorf("incorrect log format configured '%s', expected 'text' or 'json', defaulting to '%s'", formatOpt, DefaultLogFormat)
-		return DefaultLogFormat
+		logrus.WithError(
+			fmt.Errorf("incorrect log format configured '%s', expected 'text', 'text-ts', 'json' or 'json-ts'", formatOpt),
+		).Warning("Ignoring user-configured log format")
+		return DefaultLogFormatTimestamp
 	}
 
 	return LogFormat(formatOpt)
 }
 
-// configureLogLevelFromOptions returns the log level based off of the value of
-// LevelOpt in o, or the default log level if the value in the map is invalid or
-// not set.
-func (o LogOptions) configureLogLevelFromOptions() logrus.Level {
-	var level logrus.Level
-	if levelOpt, ok := o[LevelOpt]; ok {
-		if convertedLevel, ok := o.GetLogLevel(); ok {
-			level = convertedLevel
-		} else {
-			// Invalid configuration provided, go with default.
-			DefaultLogger.WithField(logfields.LogSubsys, "logging").Warningf("invalid logging level provided: %s; setting to %s", levelOpt, DefaultLogLevelStr)
-			o[LevelOpt] = DefaultLogLevelStr
-			level = LevelStringToLogrusLevel[DefaultLogLevelStr]
-		}
-	} else {
-		// No logging option provided, default to DefaultLogLevelStr.
-		o[LevelOpt] = DefaultLogLevelStr
-		level = LevelStringToLogrusLevel[DefaultLogLevelStr]
-	}
-	return level
+// SetLogLevel updates the DefaultLogger with a new logrus.Level
+func SetLogLevel(logLevel logrus.Level) {
+	DefaultLogger.SetLevel(logLevel)
 }
 
-// configureLogLevelFromOptions sets the log level of the DefaultLogger based
-// off of the value of LevelOpt in logOpts. If LevelOpt is not set in logOpts,
-// it defaults to DefaultLogLevelStr.
-func setLogLevelFromOptions(logOpts LogOptions) {
-	DefaultLogger.SetLevel(logOpts.configureLogLevelFromOptions())
+// SetDefaultLogLevel updates the DefaultLogger with the DefaultLogLevel
+func SetDefaultLogLevel() {
+	DefaultLogger.SetLevel(DefaultLogLevel)
+}
+
+// SetLogLevelToDebug updates the DefaultLogger with the logrus.DebugLevel
+func SetLogLevelToDebug() {
+	DefaultLogger.SetLevel(logrus.DebugLevel)
+}
+
+// SetLogFormat updates the DefaultLogger with a new LogFormat
+func SetLogFormat(logFormat LogFormat) {
+	DefaultLogger.SetFormatter(GetFormatter(logFormat))
+}
+
+// SetDefaultLogFormat updates the DefaultLogger with the DefaultLogFormat
+func SetDefaultLogFormat() {
+	DefaultLogger.SetFormatter(GetFormatter(DefaultLogFormatTimestamp))
+}
+
+// AddHooks adds additional logrus hook to default logger
+func AddHooks(hooks ...logrus.Hook) {
+	for _, hook := range hooks {
+		DefaultLogger.AddHook(hook)
+	}
 }
 
 // SetupLogging sets up each logging service provided in loggers and configures
 // each logger with the provided logOpts.
 func SetupLogging(loggers []string, logOpts LogOptions, tag string, debug bool) error {
-	if logFormat := logOpts.GetLogFormat(); logFormat != DefaultLogFormat {
-		DefaultLogger.Formatter = GetFormatter(logFormat)
-	}
+	// Bridge klog to logrus. Note that this will open multiple pipes and fork
+	// background goroutines that are not cleaned up.
+	initializeKLog()
+
+	// Updating the default log format
+	SetLogFormat(logOpts.GetLogFormat())
 
 	// Set default logger to output to stdout if no loggers are provided.
 	if len(loggers) == 0 {
@@ -178,7 +175,12 @@ func SetupLogging(loggers []string, logOpts LogOptions, tag string, debug bool) 
 		logrus.SetOutput(os.Stdout)
 	}
 
-	ConfigureLogLevel(debug)
+	// Updating the default log level, overriding the log options if the debug arg is being set
+	if debug {
+		SetLogLevelToDebug()
+	} else {
+		SetLogLevel(logOpts.GetLogLevel())
+	}
 
 	// always suppress the default logger so libraries don't print things
 	logrus.SetLevel(logrus.PanicLevel)
@@ -199,28 +201,6 @@ func SetupLogging(loggers []string, logOpts LogOptions, tag string, debug bool) 
 	return nil
 }
 
-// SetLogLevel sets the log level on DefaultLogger. This logger is, by
-// convention, the base logger for package specific ones thus setting the level
-// here impacts the default logging behaviour.
-// This function is thread-safe when logging, reading DefaultLogger.LevelOpt is
-// not protected this way, however.
-func SetLogLevel(level logrus.Level) {
-	DefaultLogger.SetLevel(level)
-}
-
-// ConfigureLogLevel configures the logging level of the global logger. If
-// debugging is not enabled, it will set the logging level based off of the
-// logging options configured at bootstrap. Debug being enabled takes precedence
-// over the configuration in the logging options.
-// It is thread-safe.
-func ConfigureLogLevel(debug bool) {
-	if debug {
-		SetLogLevel(logrus.DebugLevel)
-	} else {
-		setLogLevelFromOptions(logOptions)
-	}
-}
-
 // GetFormatter returns a configured logrus.Formatter with some specific values
 // we want to have
 func GetFormatter(format LogFormat) logrus.Formatter {
@@ -230,9 +210,19 @@ func GetFormatter(format LogFormat) logrus.Formatter {
 			DisableTimestamp: true,
 			DisableColors:    true,
 		}
+	case LogFormatTextTimestamp:
+		return &logrus.TextFormatter{
+			DisableTimestamp: false,
+			DisableColors:    true,
+		}
 	case LogFormatJSON:
 		return &logrus.JSONFormatter{
 			DisableTimestamp: true,
+		}
+	case LogFormatJSONTimestamp:
+		return &logrus.JSONFormatter{
+			DisableTimestamp: false,
+			TimestampFormat:  time.RFC3339Nano,
 		}
 	}
 

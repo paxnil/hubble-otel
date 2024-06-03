@@ -11,8 +11,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/model/otlp"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 
 	traceCollectorV1 "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	traceV1 "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -56,7 +55,7 @@ type BufferedDirectTraceExporter struct {
 	log         *logrus.Logger
 	consumer    consumer.Traces
 	bufferSize  int
-	unmarshaler pdata.TracesUnmarshaler
+	unmarshaler ptrace.Unmarshaler
 }
 
 func NewBufferedDirectTraceExporter(log *logrus.Logger, consumer consumer.Traces, bufferSize int) *BufferedDirectTraceExporter {
@@ -64,7 +63,7 @@ func NewBufferedDirectTraceExporter(log *logrus.Logger, consumer consumer.Traces
 		log:         log,
 		consumer:    consumer,
 		bufferSize:  bufferSize,
-		unmarshaler: otlp.NewProtobufTracesUnmarshaler(),
+		unmarshaler: &ptrace.ProtoUnmarshaler{},
 	}
 }
 

@@ -22,7 +22,7 @@ fields:
       NumConsumers is the number of consumers from the queue.
   - name: queue_size
     kind: int
-    default: 5000
+    default: 1000
     doc: |
       QueueSize is the maximum number of batches allowed in queue at a given time.
 - name: retry_on_failure
@@ -40,6 +40,17 @@ fields:
     default: 5s
     doc: |
       InitialInterval the time to wait after the first failure before retrying.
+  - name: randomization_factor
+    kind: float64
+    default: 0.5
+    doc: |
+      RandomizationFactor is a random factor used to calculate next backoffs.
+      Randomized interval = RetryInterval * (1 ± RandomizationFactor)
+  - name: multiplier
+    kind: float64
+    default: 1.5
+    doc: |
+      Multiplier is the value multiplied by the backoff interval bounds
   - name: max_interval
     type: time.Duration
     kind: int64
@@ -64,7 +75,7 @@ fields:
   kind: string
   doc: |
     The compression key for supported compression types within
-    collector. Currently the only supported mode is `gzip`.
+    collector. Supports `gzip`, `snappy` and `zstd`.
 - name: ca_file
   kind: string
   doc: |

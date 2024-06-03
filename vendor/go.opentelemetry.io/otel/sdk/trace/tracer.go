@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package trace // import "go.opentelemetry.io/otel/sdk/trace"
 
@@ -18,14 +7,16 @@ import (
 	"context"
 	"time"
 
-	"go.opentelemetry.io/otel/trace"
-
 	"go.opentelemetry.io/otel/sdk/instrumentation"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/embedded"
 )
 
 type tracer struct {
-	provider               *TracerProvider
-	instrumentationLibrary instrumentation.Library
+	embedded.Tracer
+
+	provider             *TracerProvider
+	instrumentationScope instrumentation.Scope
 }
 
 var _ trace.Tracer = &tracer{}
@@ -38,6 +29,11 @@ var _ trace.Tracer = &tracer{}
 func (tr *tracer) Start(ctx context.Context, name string, options ...trace.SpanStartOption) (context.Context, trace.Span) {
 	config := trace.NewSpanStartConfig(options...)
 
+	if ctx == nil {
+		// Prevent trace.ContextWithSpan from panicking.
+		ctx = context.Background()
+	}
+
 	// For local spans created by this SDK, track child span count.
 	if p := trace.SpanFromContext(ctx); p != nil {
 		if sdkSpan, ok := p.(*recordingSpan); ok {
@@ -47,7 +43,7 @@ func (tr *tracer) Start(ctx context.Context, name string, options ...trace.SpanS
 
 	s := tr.newSpan(ctx, name, &config)
 	if rw, ok := s.(ReadWriteSpan); ok && s.IsRecording() {
-		sps, _ := tr.provider.spanProcessors.Load().(spanProcessorStates)
+		sps := tr.provider.getSpanProcessors()
 		for _, sp := range sps {
 			sp.sp.OnStart(ctx, rw)
 		}
@@ -123,22 +119,26 @@ func (tr *tracer) newRecordingSpan(psc, sc trace.SpanContext, name string, sr Sa
 	}
 
 	s := &recordingSpan{
-		parent:                 psc,
-		spanContext:            sc,
-		spanKind:               trace.ValidateSpanKind(config.SpanKind()),
-		name:                   name,
-		startTime:              startTime,
-		attributes:             newAttributesMap(tr.provider.spanLimits.AttributeCountLimit),
-		events:                 newEvictedQueue(tr.provider.spanLimits.EventCountLimit),
-		links:                  newEvictedQueue(tr.provider.spanLimits.LinkCountLimit),
-		tracer:                 tr,
-		spanLimits:             tr.provider.spanLimits,
-		resource:               tr.provider.resource,
-		instrumentationLibrary: tr.instrumentationLibrary,
+		// Do not pre-allocate the attributes slice here! Doing so will
+		// allocate memory that is likely never going to be used, or if used,
+		// will be over-sized. The default Go compiler has been tested to
+		// dynamically allocate needed space very well. Benchmarking has shown
+		// it to be more performant than what we can predetermine here,
+		// especially for the common use case of few to no added
+		// attributes.
+
+		parent:      psc,
+		spanContext: sc,
+		spanKind:    trace.ValidateSpanKind(config.SpanKind()),
+		name:        name,
+		startTime:   startTime,
+		events:      newEvictedQueue(tr.provider.spanLimits.EventCountLimit),
+		links:       newEvictedQueue(tr.provider.spanLimits.LinkCountLimit),
+		tracer:      tr,
 	}
 
 	for _, l := range config.Links() {
-		s.addLink(l)
+		s.AddLink(l)
 	}
 
 	s.SetAttributes(sr.Attributes...)

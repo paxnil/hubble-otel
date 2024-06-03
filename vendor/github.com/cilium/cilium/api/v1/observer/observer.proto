@@ -1,21 +1,12 @@
-// Copyright 2019 Authors of Hubble
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of Hubble
 
 syntax = "proto3";
 
+import "google/protobuf/any.proto";
 import "google/protobuf/wrappers.proto";
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/field_mask.proto";
 import public "flow/flow.proto";
 import "relay/relay.proto";
 
@@ -37,6 +28,12 @@ service Observer {
 
     // GetNodes returns information about nodes in a cluster.
     rpc GetNodes(GetNodesRequest) returns (GetNodesResponse) {}
+
+    // GetNamespaces returns information about namespaces in a cluster.
+    // The namespaces returned are namespaces which have had network flows in
+    // the last hour. The namespaces are returned sorted by cluster name and
+    // namespace in ascending order.
+    rpc GetNamespaces(GetNamespacesRequest) returns (GetNamespacesResponse) {}
 
     // ServerStatus returns some details about the running hubble server.
     rpc ServerStatus(ServerStatusRequest) returns (ServerStatusResponse) {}
@@ -77,11 +74,21 @@ message ServerStatusResponse {
 
     // Version is the version of Cilium/Hubble.
     string version = 8;
+
+    // Approximate rate of flows seen by Hubble per second over the last minute.
+    // In a multi-node context, this is the sum of all flows rates.
+    double flows_rate = 9;
 }
 
 message GetFlowsRequest {
     // Number of flows that should be returned. Incompatible with `since/until`.
+    // Defaults to the most recent (last) `number` flows, unless `first` is
+    // true, then it will return the earliest `number` flows.
     uint64 number = 1;
+
+    // first specifies if we should look at the first `number` flows or the
+    // last `number` of flows. Incompatible with `follow`.
+    bool first = 9;
 
     reserved 2; // removed, do not use
 
@@ -110,6 +117,21 @@ message GetFlowsRequest {
 
     // Until this time for returned flows. Incompatible with `number`.
     google.protobuf.Timestamp until = 8;
+
+    // Experimental contains fields that are not stable yet. Support for
+    // experimental features is always optional and subject to change.
+    message Experimental {
+        // FieldMask allows clients to limit flow's fields that will be returned.
+        // For example, {paths: ["source.id", "destination.id"]} will return flows
+        // with only these two fields set.
+        google.protobuf.FieldMask field_mask = 1;
+    }
+    Experimental experimental = 999;
+
+    // extensions can be used to add arbitrary additional metadata to GetFlowsRequest.
+    // This can be used to extend functionality for other Hubble compatible
+    // APIs, or experiment with new functionality without needing to change the public API.
+    google.protobuf.Any extensions = 150000;
 }
 
 // GetFlowsResponse contains either a flow or a protocol message.
@@ -130,9 +152,14 @@ message GetFlowsResponse {
 }
 
 message GetAgentEventsRequest {
-    // Number of agent events that should be returned. Incompatible with
-    // `since/until`.
+    // Number of flows that should be returned. Incompatible with `since/until`.
+    // Defaults to the most recent (last) `number` events, unless `first` is
+    // true, then it will return the earliest `number` events.
     uint64 number = 1;
+
+    // first specifies if we should look at the first `number` events or the
+    // last `number` of events. Incompatible with `follow`.
+    bool first = 9;
 
     // follow sets when the server should continue to stream agent events after
     // printing the last N agent events.
@@ -158,9 +185,14 @@ message GetAgentEventsResponse {
 }
 
 message GetDebugEventsRequest {
-    // Number of debug events that should be returned. Incompatible with
-    // `since/until`.
+    // Number of events that should be returned. Incompatible with `since/until`.
+    // Defaults to the most recent (last) `number` events, unless `first` is
+    // true, then it will return the earliest `number` events.
     uint64 number = 1;
+
+    // first specifies if we should look at the first `number` events or the
+    // last `number` of events. Incompatible with `follow`.
+    bool first = 9;
 
     // follow sets when the server should continue to stream debug events after
     // printing the last N debug events.
@@ -229,6 +261,19 @@ message TLS {
     // ServerName is the TLS server name that can be used as part of the TLS
     // cert validation process.
     string server_name = 2;
+}
+
+message GetNamespacesRequest {}
+
+// GetNamespacesResponse contains the list of namespaces.
+message GetNamespacesResponse {
+    // Namespaces is a list of namespaces with flows
+    repeated Namespace namespaces = 1;
+}
+
+message Namespace {
+  string cluster = 1;
+  string namespace = 2;
 }
 
 // ExportEvent contains an event to be exported. Not to be used outside of the

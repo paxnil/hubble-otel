@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package ballastextension // import "go.opentelemetry.io/collector/extension/ballastextension"
 
@@ -24,7 +13,7 @@ import (
 
 const megaBytes = 1024 * 1024
 
-type MemoryBallast struct {
+type memoryBallast struct {
 	cfg              *Config
 	logger           *zap.Logger
 	ballast          []byte
@@ -32,7 +21,7 @@ type MemoryBallast struct {
 	getTotalMem      func() (uint64, error)
 }
 
-func (m *MemoryBallast) Start(_ context.Context, _ component.Host) error {
+func (m *memoryBallast) Start(context.Context, component.Host) error {
 	// absolute value supersedes percentage setting
 	if m.cfg.SizeMiB > 0 {
 		m.ballastSizeBytes = m.cfg.SizeMiB * megaBytes
@@ -54,13 +43,13 @@ func (m *MemoryBallast) Start(_ context.Context, _ component.Host) error {
 	return nil
 }
 
-func (m *MemoryBallast) Shutdown(_ context.Context) error {
+func (m *memoryBallast) Shutdown(context.Context) error {
 	m.ballast = nil
 	return nil
 }
 
-func newMemoryBallast(cfg *Config, logger *zap.Logger, getTotalMem func() (uint64, error)) *MemoryBallast {
-	return &MemoryBallast{
+func newMemoryBallast(cfg *Config, logger *zap.Logger, getTotalMem func() (uint64, error)) *memoryBallast {
+	return &memoryBallast{
 		cfg:         cfg,
 		logger:      logger,
 		getTotalMem: getTotalMem,
@@ -68,6 +57,6 @@ func newMemoryBallast(cfg *Config, logger *zap.Logger, getTotalMem func() (uint6
 }
 
 // GetBallastSize returns the current ballast memory setting in bytes
-func (m *MemoryBallast) GetBallastSize() uint64 {
+func (m *memoryBallast) GetBallastSize() uint64 {
 	return m.ballastSizeBytes
 }

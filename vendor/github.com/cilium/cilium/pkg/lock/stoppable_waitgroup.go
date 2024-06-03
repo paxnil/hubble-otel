@@ -1,16 +1,5 @@
-// Copyright 2019 Authors of Cilium
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of Cilium
 
 package lock
 
@@ -25,7 +14,7 @@ type StoppableWaitGroup struct {
 	noopAdd  chan struct{}
 	// i is the internal counter which can store tolerate negative values
 	// as opposed the golang's library WaitGroup.
-	i                  *int64
+	i                  atomic.Int64
 	doneOnce, stopOnce sync.Once
 }
 
@@ -35,7 +24,6 @@ func NewStoppableWaitGroup() *StoppableWaitGroup {
 	return &StoppableWaitGroup{
 		noopDone: make(chan struct{}),
 		noopAdd:  make(chan struct{}),
-		i:        func() *int64 { i := int64(0); return &i }(),
 		doneOnce: sync.Once{},
 		stopOnce: sync.Once{},
 	}
@@ -69,20 +57,20 @@ func (l *StoppableWaitGroup) WaitChannel() <-chan struct{} {
 	return l.noopDone
 }
 
-// Add adds the go routine to the list of routines to that Wait() will have
+// Add adds the goroutine to the list of routines to that Wait() will have
 // to wait before it returns.
 // If the StoppableWaitGroup was stopped this will be a no-op.
 func (l *StoppableWaitGroup) Add() {
 	select {
 	case <-l.noopAdd:
 	default:
-		atomic.AddInt64(l.i, 1)
+		l.i.Add(1)
 	}
 }
 
-// Done will decrement the number of go routines the Wait() will have to wait
+// Done will decrement the number of goroutines the Wait() will have to wait
 // before it returns.
-// This function is a no-op once all go routines that have called 'Add()' have
+// This function is a no-op once all goroutines that have called 'Add()' have
 // also called 'Done()' and the StoppableWaitGroup was stopped.
 func (l *StoppableWaitGroup) Done() {
 	select {
@@ -91,14 +79,14 @@ func (l *StoppableWaitGroup) Done() {
 	default:
 		select {
 		case <-l.noopAdd:
-			a := atomic.AddInt64(l.i, -1)
+			a := l.i.Add(-1)
 			if a <= 0 {
 				l.doneOnce.Do(func() {
 					close(l.noopDone)
 				})
 			}
 		default:
-			a := atomic.AddInt64(l.i, -1)
+			a := l.i.Add(-1)
 			select {
 			// in case the channel was close while we where in this default
 			// case we will need to check if 'a' is less than zero and close

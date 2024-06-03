@@ -1,86 +1,73 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package batchprocessor // import "go.opentelemetry.io/collector/processor/batchprocessor"
 
 import (
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/plog"
 )
 
 // splitLogs removes logrecords from the input data and returns a new data of the specified size.
-func splitLogs(size int, src pdata.Logs) pdata.Logs {
+func splitLogs(size int, src plog.Logs) plog.Logs {
 	if src.LogRecordCount() <= size {
 		return src
 	}
-	totalCopiedLogs := 0
-	dest := pdata.NewLogs()
+	totalCopiedLogRecords := 0
+	dest := plog.NewLogs()
 
-	src.ResourceLogs().RemoveIf(func(srcRs pdata.ResourceLogs) bool {
+	src.ResourceLogs().RemoveIf(func(srcRl plog.ResourceLogs) bool {
 		// If we are done skip everything else.
-		if totalCopiedLogs == size {
+		if totalCopiedLogRecords == size {
 			return false
 		}
 
 		// If it fully fits
-		srcRsCount := resourceLogsCount(srcRs)
-		if (totalCopiedLogs + srcRsCount) <= size {
-			totalCopiedLogs += srcRsCount
-			srcRs.MoveTo(dest.ResourceLogs().AppendEmpty())
+		srcRlLRC := resourceLRC(srcRl)
+		if (totalCopiedLogRecords + srcRlLRC) <= size {
+			totalCopiedLogRecords += srcRlLRC
+			srcRl.MoveTo(dest.ResourceLogs().AppendEmpty())
 			return true
 		}
 
-		destRs := dest.ResourceLogs().AppendEmpty()
-		srcRs.Resource().CopyTo(destRs.Resource())
-
-		srcRs.InstrumentationLibraryLogs().RemoveIf(func(srcIlm pdata.InstrumentationLibraryLogs) bool {
+		destRl := dest.ResourceLogs().AppendEmpty()
+		srcRl.Resource().CopyTo(destRl.Resource())
+		srcRl.ScopeLogs().RemoveIf(func(srcIll plog.ScopeLogs) bool {
 			// If we are done skip everything else.
-			if totalCopiedLogs == size {
+			if totalCopiedLogRecords == size {
 				return false
 			}
 
 			// If possible to move all metrics do that.
-			srcLogsLen := srcIlm.Logs().Len()
-			if size >= srcLogsLen+totalCopiedLogs {
-				totalCopiedLogs += srcLogsLen
-				srcIlm.MoveTo(destRs.InstrumentationLibraryLogs().AppendEmpty())
+			srcIllLRC := srcIll.LogRecords().Len()
+			if size >= srcIllLRC+totalCopiedLogRecords {
+				totalCopiedLogRecords += srcIllLRC
+				srcIll.MoveTo(destRl.ScopeLogs().AppendEmpty())
 				return true
 			}
 
-			destIlm := destRs.InstrumentationLibraryLogs().AppendEmpty()
-			srcIlm.InstrumentationLibrary().CopyTo(destIlm.InstrumentationLibrary())
-
-			srcIlm.Logs().RemoveIf(func(srcMetric pdata.LogRecord) bool {
+			destIll := destRl.ScopeLogs().AppendEmpty()
+			srcIll.Scope().CopyTo(destIll.Scope())
+			srcIll.LogRecords().RemoveIf(func(srcMetric plog.LogRecord) bool {
 				// If we are done skip everything else.
-				if totalCopiedLogs == size {
+				if totalCopiedLogRecords == size {
 					return false
 				}
-				srcMetric.MoveTo(destIlm.Logs().AppendEmpty())
-				totalCopiedLogs++
+				srcMetric.MoveTo(destIll.LogRecords().AppendEmpty())
+				totalCopiedLogRecords++
 				return true
 			})
 			return false
 		})
-		return srcRs.InstrumentationLibraryLogs().Len() == 0
+		return srcRl.ScopeLogs().Len() == 0
 	})
 
 	return dest
 }
 
-// resourceLogsCount calculates the total number of logs.
-func resourceLogsCount(rs pdata.ResourceLogs) (count int) {
-	for k := 0; k < rs.InstrumentationLibraryLogs().Len(); k++ {
-		count += rs.InstrumentationLibraryLogs().At(k).Logs().Len()
+// resourceLRC calculates the total number of log records in the plog.ResourceLogs.
+func resourceLRC(rs plog.ResourceLogs) (count int) {
+	for k := 0; k < rs.ScopeLogs().Len(); k++ {
+		count += rs.ScopeLogs().At(k).LogRecords().Len()
 	}
 	return
 }

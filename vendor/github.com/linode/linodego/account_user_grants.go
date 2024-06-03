@@ -3,6 +3,8 @@ package linodego
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/url"
 )
 
 type GrantPermissionLevel string
@@ -14,7 +16,9 @@ const (
 
 type GlobalUserGrants struct {
 	AccountAccess        *GrantPermissionLevel `json:"account_access"`
+	AddDatabases         bool                  `json:"add_databases"`
 	AddDomains           bool                  `json:"add_domains"`
+	AddFirewalls         bool                  `json:"add_firewalls"`
 	AddImages            bool                  `json:"add_images"`
 	AddLinodes           bool                  `json:"add_linodes"`
 	AddLongview          bool                  `json:"add_longview"`
@@ -37,7 +41,9 @@ type GrantedEntity struct {
 }
 
 type UserGrants struct {
+	Database     []GrantedEntity `json:"database"`
 	Domain       []GrantedEntity `json:"domain"`
+	Firewall     []GrantedEntity `json:"firewall"`
 	Image        []GrantedEntity `json:"image"`
 	Linode       []GrantedEntity `json:"linode"`
 	Longview     []GrantedEntity `json:"longview"`
@@ -49,7 +55,9 @@ type UserGrants struct {
 }
 
 type UserGrantsUpdateOptions struct {
+	Database     []GrantedEntity   `json:"database,omitempty"`
 	Domain       []EntityUserGrant `json:"domain,omitempty"`
+	Firewall     []EntityUserGrant `json:"firewall,omitempty"`
 	Image        []EntityUserGrant `json:"image,omitempty"`
 	Linode       []EntityUserGrant `json:"linode,omitempty"`
 	Longview     []EntityUserGrant `json:"longview,omitempty"`
@@ -61,12 +69,10 @@ type UserGrantsUpdateOptions struct {
 }
 
 func (c *Client) GetUserGrants(ctx context.Context, username string) (*UserGrants, error) {
-	e, err := c.UserGrants.endpointWithParams(username)
-	if err != nil {
-		return nil, err
-	}
-
-	r, err := coupleAPIErrors(c.R(ctx).SetResult(&UserGrants{}).Get(e))
+	username = url.PathEscape(username)
+	e := fmt.Sprintf("account/users/%s/grants", username)
+	req := c.R(ctx).SetResult(&UserGrants{})
+	r, err := coupleAPIErrors(req.Get(e))
 	if err != nil {
 		return nil, err
 	}
@@ -74,23 +80,16 @@ func (c *Client) GetUserGrants(ctx context.Context, username string) (*UserGrant
 	return r.Result().(*UserGrants), nil
 }
 
-func (c *Client) UpdateUserGrants(ctx context.Context, username string, updateOpts UserGrantsUpdateOptions) (*UserGrants, error) {
-	var body string
-
-	e, err := c.UserGrants.endpointWithParams(username)
+func (c *Client) UpdateUserGrants(ctx context.Context, username string, opts UserGrantsUpdateOptions) (*UserGrants, error) {
+	body, err := json.Marshal(opts)
 	if err != nil {
 		return nil, err
 	}
 
-	req := c.R(ctx).SetResult(&UserGrants{})
-
-	if bodyData, err := json.Marshal(updateOpts); err == nil {
-		body = string(bodyData)
-	} else {
-		return nil, NewError(err)
-	}
-
-	r, err := coupleAPIErrors(req.SetBody(body).Put(e))
+	username = url.PathEscape(username)
+	e := fmt.Sprintf("account/users/%s/grants", username)
+	req := c.R(ctx).SetResult(&UserGrants{}).SetBody(string(body))
+	r, err := coupleAPIErrors(req.Put(e))
 	if err != nil {
 		return nil, err
 	}

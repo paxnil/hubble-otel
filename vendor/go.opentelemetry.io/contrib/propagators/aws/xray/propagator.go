@@ -1,18 +1,7 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
-package xray
+package xray // import "go.opentelemetry.io/contrib/propagators/aws/xray"
 
 import (
 	"context"
@@ -57,7 +46,7 @@ var (
 //
 // Example AWS X-Ray format:
 //
-// X-Amzn-Trace-Id: Root={traceId};Parent={parentId};Sampled={samplingFlag}
+// X-Amzn-Trace-Id: Root={traceId};Parent={parentId};Sampled={samplingFlag}.
 type Propagator struct{}
 
 // Asserts that the propagator implements the otel.TextMapPropagator interface at compile time.
@@ -77,8 +66,10 @@ func (xray Propagator) Inject(ctx context.Context, carrier propagation.TextMapCa
 	if sc.TraceFlags() == traceFlagSampled {
 		samplingFlag = isSampled
 	}
-	headers := []string{traceIDKey, kvDelimiter, xrayTraceID, traceHeaderDelimiter, parentIDKey,
-		kvDelimiter, parentID.String(), traceHeaderDelimiter, sampleFlagKey, kvDelimiter, samplingFlag}
+	headers := []string{
+		traceIDKey, kvDelimiter, xrayTraceID, traceHeaderDelimiter, parentIDKey,
+		kvDelimiter, parentID.String(), traceHeaderDelimiter, sampleFlagKey, kvDelimiter, samplingFlag,
+	}
 
 	carrier.Set(traceHeaderKey, strings.Join(headers, ""))
 }
@@ -110,7 +101,7 @@ func extract(headerVal string) (trace.SpanContext, error) {
 			part = headerVal[pos:delimiterIndex]
 			pos = delimiterIndex + 1
 		} else {
-			//last part
+			// last part
 			part = strings.TrimSpace(headerVal[pos:])
 			pos = len(headerVal)
 		}
@@ -125,13 +116,13 @@ func extract(headerVal string) (trace.SpanContext, error) {
 				return empty, err
 			}
 		} else if strings.HasPrefix(part, parentIDKey) {
-			//extract parentId
+			// extract parentId
 			scc.SpanID, err = trace.SpanIDFromHex(value)
 			if err != nil {
 				return empty, errInvalidSpanIDLength
 			}
 		} else if strings.HasPrefix(part, sampleFlagKey) {
-			//extract traceflag
+			// extract traceflag
 			scc.TraceFlags = parseTraceFlag(value)
 		}
 	}
