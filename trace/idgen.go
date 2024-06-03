@@ -385,6 +385,10 @@ func (tc *TraceCache) GetSpanContext(f *flow.Flow, parseHeaders bool) (*trace.Sp
 			}
 		}
 
+		if f.TraceContext != nil && f.TraceContext.Parent != nil {
+			fetchedTraceID, _ = trace.TraceIDFromHex(f.TraceContext.Parent.TraceId)
+		}
+
 		// when both keys are missing, an empty (i.e. invalid) value is returned
 		if !fetchedTraceID.IsValid() {
 			e.generateTraceID(scc)
